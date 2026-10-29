@@ -1,4 +1,8 @@
+using EmpleadoDelMes.Infrastructure;
+
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddInfrastructure(builder.Configuration);
 
 // 1. Controllers
 builder.Services.AddControllers();

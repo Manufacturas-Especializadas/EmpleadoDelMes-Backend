@@ -15,5 +15,6 @@
 
 	<ItemGroup>
 	  <ProjectReference Include="..\..\src\EmpleadoDelMes.Api\EmpleadoDelMes.Api.csproj" />
+	  <ProjectReference Include="..\..\src\EmpleadoDelMes.Domain\EmpleadoDelMes.Domain.csproj" />
 	</ItemGroup>
 </Project>
