@@ -1,3 +1,5 @@
+using EmpleadoDelMes.Application.Accounts;
+using EmpleadoDelMes.Application.Employees;
 using EmpleadoDelMes.Infrastructure.Identity;
 using EmpleadoDelMes.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Identity;
@@ -27,10 +29,30 @@ public static class DependencyInjection
             options.UseSqlServer(connectionString);
         });
 
-        services.AddIdentityCore<ApplicationUser>(options => options.Stores.MaxLengthForKeys = 128)
+        services.AddIdentityCore<ApplicationUser>(options =>
+        {
+            options.Stores.MaxLengthForKeys = 128;
+            options.Password.RequiredLength = 12;
+            options.Password.RequiredUniqueChars = 4;
+            options.Password.RequireDigit = false;
+            options.Password.RequireLowercase = false;
+            options.Password.RequireUppercase = false;
+            options.Password.RequireNonAlphanumeric = false;
+            options.Lockout.AllowedForNewUsers = true;
+            options.Lockout.MaxFailedAccessAttempts = 5;
+            options.Lockout.DefaultLockoutTimeSpan = TimeSpan.FromMinutes(15);
+        })
             .AddRoles<IdentityRole<Guid>>()
             .AddEntityFrameworkStores<ApplicationDbContext>();
 
+        services.AddScoped<IEmployeeRepository, EmployeeRepository>();
+        services.AddScoped<EmployeeService>();
+        services.AddScoped<IAccountService, IdentityAccountService>();
+        services.AddScoped<IAccountTransactionRunner, AccountTransactionRunner>();
+        services.AddSingleton<TemporaryPasswordGenerator>();
+        services.AddScoped<AdminBootstrapInitializer>();
+        services.AddScoped<IAdminBootstrapTransaction, AdminBootstrapTransaction>();
+        services.AddSingleton<AdminBootstrapStartup>();
         return services;
     }
 }
