@@ -27,7 +27,7 @@ public static class DependencyInjection
             options.UseSqlServer(connectionString);
         });
 
-        services.AddIdentityCore<ApplicationUser>()
+        services.AddIdentityCore<ApplicationUser>(options => options.Stores.MaxLengthForKeys = 128)
             .AddRoles<IdentityRole<Guid>>()
             .AddEntityFrameworkStores<ApplicationDbContext>();
 

@@ -4,6 +4,16 @@ namespace EmpleadoDelMes.Domain.Entities;
 
 public sealed class Nomination
 {
+    // Rehidratación de persistencia; la creación de dominio usa el constructor público.
+    private Nomination()
+    {
+        SponsorPayrollNumber = null!;
+        SponsorFullName = null!;
+        CandidatePayrollNumber = null!;
+        CandidateFullName = null!;
+        Justification = null!;
+    }
+
     public Nomination(Guid id, Guid campaignId, Employee sponsor, Employee candidate,
         Guid createdByUserId, NominationQualities qualities, string justification, DateTimeOffset registeredAt)
     {

@@ -5,6 +5,11 @@ namespace EmpleadoDelMes.Domain.Entities;
 
 public sealed class Campaign
 {
+    // Rehidratación de persistencia; la creación de dominio usa el constructor público.
+    private Campaign()
+    {
+    }
+
     public Campaign(Guid id, DateOnly evaluationMonth, DateTimeOffset createdAt)
     {
         Id = DomainGuard.RequiredId(id, nameof(id));

@@ -4,6 +4,12 @@ namespace EmpleadoDelMes.Domain.Entities;
 
 public sealed class CandidateOpinion
 {
+    // Rehidratación de persistencia; la creación de dominio usa el constructor público.
+    private CandidateOpinion()
+    {
+        Content = null!;
+    }
+
     public CandidateOpinion(Guid id, Guid campaignId, Guid candidateEmployeeId,
         OpinionSource opinionSource, string content, Guid createdByUserId, DateTimeOffset createdAt)
     {

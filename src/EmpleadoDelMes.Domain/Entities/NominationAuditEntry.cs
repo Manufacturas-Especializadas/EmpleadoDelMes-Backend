@@ -4,6 +4,12 @@ namespace EmpleadoDelMes.Domain.Entities;
 
 public sealed class NominationAuditEntry
 {
+    // Rehidratación de persistencia; la creación de dominio usa el constructor público.
+    private NominationAuditEntry()
+    {
+        Reason = null!;
+    }
+
     public NominationAuditEntry(Guid id, Guid nominationId, Guid actorUserId,
         NominationAuditAction action, DateTimeOffset occurredAt, string reason, string? details = null)
     {

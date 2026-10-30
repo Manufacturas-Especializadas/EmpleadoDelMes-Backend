@@ -2,6 +2,11 @@ namespace EmpleadoDelMes.Domain.Entities;
 
 public sealed class Preselection
 {
+    // Rehidratación de persistencia; la creación de dominio usa el constructor público.
+    private Preselection()
+    {
+    }
+
     public Preselection(Guid campaignId, Guid candidateEmployeeId, Guid actorUserId, DateTimeOffset changedAt)
     {
         CampaignId = DomainGuard.RequiredId(campaignId, nameof(campaignId));
