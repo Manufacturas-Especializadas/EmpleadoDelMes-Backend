@@ -11,7 +11,8 @@ public sealed class IdentityAccountService(
     RoleManager<IdentityRole<Guid>> roles,
     IEmployeeRepository employees,
     IAccountTransactionRunner transactions,
-    TemporaryPasswordGenerator passwords) : IAccountService
+    TemporaryPasswordGenerator passwords,
+    IPasswordHasher<ApplicationUser> passwordHasher) : IAccountService
 {
     private const string InvalidLogin = "El usuario o la contraseña son incorrectos, o la cuenta está bloqueada temporalmente.";
     private static AccountResult<T> Fail<T>(AccountError error, string message) => new(default, error, message);
@@ -23,7 +24,12 @@ public sealed class IdentityAccountService(
             if (employeeId == Guid.Empty) return Fail<CreatedAccount>(AccountError.Validation, "Selecciona un empleado para crear la cuenta.");
             var employee = await employees.GetByIdAsync(employeeId, cancellationToken);
             if (employee is null) return Fail<CreatedAccount>(AccountError.NotFound, "No encontramos al empleado.");
-            return await Create(employee.PayrollNumber, employee.Id, AccountRoles.Sponsor, cancellationToken);
+            return await Create(
+    employee.PayrollNumber,
+    employee.Id,
+    AccountRoles.Sponsor,
+    cancellationToken,
+    passwordIsPayroll: true);
         });
 
     public Task<AccountResult<CreatedAccount>> CreateAdministrativeAsync(string userName, string role, CancellationToken cancellationToken = default) =>
@@ -34,7 +40,12 @@ public sealed class IdentityAccountService(
             return await Create(userName.Trim(), null, role, cancellationToken);
         });
 
-    private Task<AccountResult<CreatedAccount>> Create(string name, Guid? employeeId, string role, CancellationToken token) =>
+    private Task<AccountResult<CreatedAccount>> Create(
+    string name,
+    Guid? employeeId,
+    string role,
+    CancellationToken token,
+    bool passwordIsPayroll = false) =>
         transactions.RunAsync(async () =>
         {
             // El índice único de EmployeeId también protege frente a carreras y cuentas con otro nombre.
@@ -51,8 +62,22 @@ public sealed class IdentityAccountService(
                 Id = Guid.NewGuid(), UserName = name, EmployeeId = employeeId,
                 MustChangePassword = true, LockoutEnabled = true
             };
-            var password = passwords.Generate();
-            var created = await users.CreateAsync(user, password);
+            var password = passwordIsPayroll
+                ? name
+                : passwords.Generate();
+
+            IdentityResult created;
+
+            if (passwordIsPayroll)
+            {
+                user.PasswordHash = passwordHasher.HashPassword(user, password);
+
+                created = await users.CreateAsync(user);
+            }
+            else
+            {
+                created = await users.CreateAsync(user, password);
+            }
             if (!created.Succeeded) return IdentityFailure<CreatedAccount>(created);
             var assigned = await users.AddToRoleAsync(user, role);
             if (!assigned.Succeeded) return IdentityFailure<CreatedAccount>(assigned);
@@ -101,6 +126,13 @@ public sealed class IdentityAccountService(
             return Denied<AccountInfo>();
         if (string.IsNullOrWhiteSpace(newPassword) || newPassword.Length < 12)
             return Fail<AccountInfo>(AccountError.Validation, "Usa una contraseña o frase de al menos 12 caracteres.");
+        if (newPassword == currentPassword ||
+        (user.EmployeeId.HasValue && newPassword == user.UserName))
+        {
+            return Fail<AccountInfo>(
+                AccountError.Validation,
+                "La nueva contraseña debe ser diferente de la contraseña inicial.");
+        }
         return await transactions.RunAsync(async () =>
         {
             // ChangePasswordAsync comprueba la actual, valida la nueva y renueva el security stamp.

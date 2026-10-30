@@ -31,3 +31,29 @@ public interface IAccountService
     Task<AccountResult<AccountInfo>> GetAccountAsync(Guid id, CancellationToken cancellationToken = default);
     Task<AccountResult<AccountInfo>> ChangePasswordAsync(Guid id, string currentPassword, string newPassword, CancellationToken cancellationToken = default);
 }
+
+
+public sealed record AccountListItem(
+    Guid Id,
+    string UserName,
+    Guid? EmployeeId,
+    string? EmployeeFullName,
+    bool MustChangePassword,
+    IReadOnlyList<string> Roles);
+
+public sealed record AccountPage(
+    IReadOnlyList<AccountListItem> Items,
+    int Total,
+    int PageNumber,
+    int PageSize);
+
+public interface IAccountDirectory
+{
+    Task<AccountResult<AccountPage>> SearchAsync(
+        string? term,
+        string? role,
+        int pageNumber,
+        int pageSize,
+        CancellationToken cancellationToken = default);
+}
+

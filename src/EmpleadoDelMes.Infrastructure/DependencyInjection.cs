@@ -48,6 +48,7 @@ public static class DependencyInjection
         services.AddScoped<IEmployeeRepository, EmployeeRepository>();
         services.AddScoped<EmployeeService>();
         services.AddScoped<IAccountService, IdentityAccountService>();
+        services.AddScoped<IAccountDirectory, AccountDirectory>();
         services.AddScoped<IAccountTransactionRunner, AccountTransactionRunner>();
         services.AddSingleton<TemporaryPasswordGenerator>();
         services.AddScoped<AdminBootstrapInitializer>();

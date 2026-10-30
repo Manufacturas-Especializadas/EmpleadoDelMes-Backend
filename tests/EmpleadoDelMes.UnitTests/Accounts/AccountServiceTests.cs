@@ -42,7 +42,7 @@ public sealed class AccountServiceTests
         Assert.AreEqual(employee.Id, created.Account.EmployeeId);
         CollectionAssert.AreEqual(new[] { AccountRoles.Sponsor }, created.Account.Roles.ToArray());
         Assert.IsTrue(created.Account.MustChangePassword);
-        Assert.AreNotEqual(payroll, created.TemporaryPassword);
+        Assert.AreEqual(payroll, created.TemporaryPassword);
         Assert.AreNotEqual(created.TemporaryPassword, store.Users[created.Account.Id].PasswordHash);
         Assert.IsTrue((await service.ValidateCredentialsAsync(payroll, created.TemporaryPassword)).IsSuccess);
         Assert.AreEqual(AccountError.Duplicate, (await service.CreateSponsorAsync(employee.Id)).Error);
