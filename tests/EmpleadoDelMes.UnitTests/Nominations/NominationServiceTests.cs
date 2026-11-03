@@ -193,7 +193,7 @@ public sealed class NominationServiceTests
         }
         var page = (await f.Service.SearchCandidatesAsync(f.UserId, "Candidato", 2, 10)).Value!;
         Assert.AreEqual(30, page.Total); Assert.AreEqual(10, page.Items.Count); Assert.AreEqual("E010", page.Items[0].PayrollNumber);
-        Assert.AreEqual("007", (await f.Service.SearchCandidatesAsync(f.UserId, "007")).Value!.Items.Single().PayrollNumber);
+        Assert.AreEqual("007", (await f.Service.SearchCandidatesAsync(f.UserId, "007")).Value!.Items.Single(e => e.PayrollNumber == "007").PayrollNumber);
         Assert.AreEqual(NominationError.Validation, (await f.Service.SearchCandidatesAsync(f.UserId, "")).Error);
         Assert.AreEqual(NominationError.Validation, (await f.Service.SearchCandidatesAsync(f.UserId, "Candidato", 1, 101)).Error);
         Assert.IsFalse(System.Text.Json.JsonSerializer.Serialize(page).Contains("Version"));

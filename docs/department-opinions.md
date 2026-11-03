@@ -1,0 +1,19 @@
+# Opiniones departamentales — 7B
+
+Endpoints: GET /api/opinions/candidates?campaignId={guid}&pageNumber=1&pageSize=20&term=, GET /api/opinions/{campaignId}/{candidateEmployeeId} y PUT sobre esa misma ruta de detalle.
+
+La sesión se valida con el middleware existente: cuenta activa, security stamp, bloqueo y cambio obligatorio de contraseña. Los roles se reconstruyen desde Identity. Application exige exactamente un rol departamental (HumanResources, Safety o Quality), sin Administrator ni Sponsor; rechaza identidades departamentales ambiguas. El origen nunca procede del cuerpo HTTP. Tampoco se acepta autor: los campos adicionales del JSON se rechazan. ImmediateSupervisor no participa en este flujo.
+
+El listado devuelve candidatos de convocatorias no archivadas con preselección activa y al menos una postulación válida. HasOpinion usa exclusivamente el origen autenticado. Se utilizan EXISTS, filtros y paginación SQL, sin N+1. El orden es nómina e identificador; nóminas como 007 se conservan. CampaignId es obligatorio, PageNumber positivo, PageSize entre 1 y 100, desplazamiento sin overflow y Term hasta 100 caracteres. Convocatoria inexistente: 404; archivada: lista vacía. El listado puede consultarse con el periodo cerrado.
+
+GET de detalle devuelve HasOpinion y Opinion. Si no existe, responde 200 con HasOpinion=false y el mensaje "La opinión de tu departamento está pendiente.". Convocatoria o empleado inexistentes producen 404. Una opinión propia previa sigue siendo consultable después del retiro, pérdida de postulaciones válidas, cierre o archivado; nunca se devuelve información de otros departamentos.
+
+PUT recibe {"content":"Texto", "version":null} para crear. Para editar exige la versión Base64 de 8 bytes obtenida en la consulta. Sin versión sobre una opinión existente, con versión obsoleta o con versión sobre una opinión inexistente responde 409, sin sobrescribir. Creación: 201 con Location al detalle; edición: 200. La respuesta contiene ID, convocatoria, candidato, contenido, fechas y versión actualizada, sin datos de autenticación.
+
+Application utiliza CandidateOpinion y EditContent para validar texto obligatorio y máximo 500 caracteres. Con contenido normalizado idéntico y versión vigente devuelve 200 sin escribir ni cambiar LastModifiedAtUtc o RowVersion. Conserva autor y fecha originales; TimeProvider establece la fecha UTC de cambios reales. No hay historial adicional.
+
+Cada escritura abre una sola transacción y adquiere CampaignAdministrationLock antes de consultar la convocatoria, preselección, postulaciones válidas y opinión propia. Se comprueba Campaign.CanAcceptOpinions con TimeProvider dentro del bloqueo, respetando modos automático y manual y archivado. Comparte orden y recurso con cierres, archivo, retiro y anulaciones. La decisión de aceptación se toma bajo ese bloqueo antes de guardar; un cierre administrativo no puede intercalarse. La clave única por convocatoria, candidato y origen protege inserciones; RowVersion protege actualizaciones. Un fallo revierte la transacción y descarta el seguimiento de la entidad intentada.
+
+HTTP: 400 solicitudes inválidas; 401 sesión inválida; 403 roles no autorizados o ambiguos; 404 convocatoria/candidato inexistente; 409 periodo cerrado, no elegible o concurrencia; 503 persistencia. Los errores del proveedor no se exponen.
+
+No se modifican preselecciones ni se eliminan opiniones al retirar candidatos. No hay migraciones, auditoría nueva, calificaciones, aprobación automática ni opinión del jefe inmediato. No se añadieron pruebas por decisión del proyecto. La suite existente solo acredita regresiones; quedan pendientes pruebas reales de aislamiento departamental, SQL generado, planes, índice único, RowVersion, rollback y concurrencia entre instancias. Total y página se consultan por separado y pueden variar por cambios concurrentes. No se accedió a bases reales.

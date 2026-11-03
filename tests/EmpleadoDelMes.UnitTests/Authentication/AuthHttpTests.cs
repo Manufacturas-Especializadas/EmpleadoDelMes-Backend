@@ -3,6 +3,8 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using EmpleadoDelMes.Application.Accounts;
+using EmpleadoDelMes.Application.Nominations;
+using EmpleadoDelMes.UnitTests.Nominations;
 using EmpleadoDelMes.Application.Campaigns;
 using EmpleadoDelMes.UnitTests.Campaigns;
 using EmpleadoDelMes.Application.Employees;
@@ -45,6 +47,7 @@ public sealed class AuthHttpTests
     {
         internal readonly AccountTestStore Store = new();
         internal readonly CampaignTestRepository Campaigns = new();
+        internal NominationTestRepository Nominations = null!;
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseEnvironment("Testing");
@@ -54,6 +57,8 @@ public sealed class AuthHttpTests
                 new Dictionary<string, string?> { ["AdminBootstrap:Enabled"] = "false", ["CampaignAutomation:Enabled"] = "false" }));
             builder.ConfigureServices(services =>
             {
+                Nominations = new NominationTestRepository(Store, Campaigns);
+                services.AddSingleton<INominationRepository>(Nominations);
                 services.AddSingleton<IUserStore<ApplicationUser>>(Store);
                 services.AddSingleton<IRoleStore<IdentityRole<Guid>>>(Store);
                 services.AddSingleton<IEmployeeRepository>(Store);
@@ -64,6 +69,16 @@ public sealed class AuthHttpTests
             });
         }
         internal HttpClient Client() => CreateClient(new WebApplicationFactoryClientOptions { BaseAddress = new Uri("https://localhost") });
+        internal async Task<CreatedAccount> Sponsor(bool temporary = false)
+        {
+            var employee = new EmployeeDto(Guid.NewGuid(), "007", "Ana Pérez", "");
+            Store.Employees.Add(employee.Id, employee);
+            using var scope = Services.CreateScope();
+            var result = await scope.ServiceProvider.GetRequiredService<IAccountService>().CreateSponsorAsync(employee.Id);
+            Assert.IsTrue(result.IsSuccess, result.Message);
+            Store.Users[result.Value!.Account.Id].MustChangePassword = temporary;
+            return result.Value;
+        }
         internal async Task<CreatedAccount> Account(bool temporary = true, string role = AccountRoles.Administrator)
         {
             using var scope = Services.CreateScope();
@@ -85,6 +100,100 @@ public sealed class AuthHttpTests
         return tokens;
     }
     private static void Bearer(HttpClient client, string token) => client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+    [TestMethod]
+    public async Task SponsorNominationHttp_CreatesUsingTrustedIdentity_AndReturns201()
+    {
+        using var host = new Host(); using var client = host.Client();
+        var account = await host.Sponsor(); var tokens = await Login(client, account); Bearer(client, tokens.AccessToken);
+        var candidate = new EmployeeDto(Guid.NewGuid(), "123", "Luis López", "private-version"); host.Store.Employees.Add(candidate.Id, candidate);
+        var campaign = new EmpleadoDelMes.Domain.Entities.Campaign(Guid.NewGuid(), new(2026, 10, 1), DateTimeOffset.UtcNow);
+        campaign.OpenNominations(); host.Campaigns.Campaigns.Add(campaign.EvaluationMonth, campaign);
+        var active = await client.GetFromJsonAsync<JsonElement>("/api/nominations/active-campaign");
+        Assert.AreEqual(campaign.Id, active.GetProperty("id").GetGuid());
+        var search = await client.GetFromJsonAsync<JsonElement>("/api/nominations/candidates?term=Luis&pageSize=1");
+        var row = search.GetProperty("items")[0];
+        CollectionAssert.AreEquivalent(new[] { "id", "payrollNumber", "fullName" }, row.EnumerateObject().Select(p => p.Name).ToArray());
+        var request = new { candidateEmployeeId = candidate.Id, qualities = 5, justification = "  Colabora con su equipo.  " };
+        var response = await client.PostAsJsonAsync("/api/nominations", request);
+        Assert.AreEqual(HttpStatusCode.Created, response.StatusCode, await response.Content.ReadAsStringAsync());
+        var result = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.AreEqual(account.Account.Id, result.GetProperty("createdByUserId").GetGuid());
+        Assert.AreEqual(account.Account.EmployeeId, result.GetProperty("sponsor").GetProperty("id").GetGuid());
+        Assert.AreEqual("007", result.GetProperty("sponsor").GetProperty("payrollNumber").GetString());
+        Assert.AreEqual("Colabora con su equipo.", result.GetProperty("justification").GetString());
+        Assert.IsFalse(result.ToString().Contains("password", StringComparison.OrdinalIgnoreCase));
+        Assert.AreEqual(HttpStatusCode.Conflict, (await client.PostAsJsonAsync("/api/nominations", request)).StatusCode);
+        Assert.AreEqual(1, host.Nominations.Nominations.Count);
+    }
+
+    [TestMethod]
+    [DataRow("sponsorEmployeeId")]
+    [DataRow("sponsorPayrollNumber")]
+    [DataRow("sponsorFullName")]
+    [DataRow("createdByUserId")]
+    [DataRow("campaignId")]
+    public async Task NominationHttp_RejectsClientSuppliedIdentityAndCampaign(string field)
+    {
+        using var host = new Host(); using var client = host.Client();
+        var tokens = await Login(client, await host.Sponsor()); Bearer(client, tokens.AccessToken);
+        var body = new Dictionary<string, object>
+        {
+            ["candidateEmployeeId"] = Guid.NewGuid(), ["qualities"] = 5, ["justification"] = "Texto válido", [field] = Guid.NewGuid().ToString()
+        };
+        Assert.AreEqual(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/nominations", body)).StatusCode);
+        Assert.AreEqual(0, host.Nominations.Nominations.Count);
+    }
+
+    [TestMethod]
+    [DataRow(AccountRoles.Administrator)]
+    [DataRow(AccountRoles.HumanResources)]
+    [DataRow(AccountRoles.Safety)]
+    [DataRow(AccountRoles.Quality)]
+    public async Task NominationHttp_RequiresSponsorOnEveryEndpoint(string role)
+    {
+        using var host = new Host(); using var client = host.Client();
+        var body = new { candidateEmployeeId = Guid.NewGuid(), qualities = 1, justification = "Texto" };
+        Assert.AreEqual(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/nominations/active-campaign")).StatusCode);
+        Assert.AreEqual(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/nominations/candidates?term=007")).StatusCode);
+        Assert.AreEqual(HttpStatusCode.Unauthorized, (await client.PostAsJsonAsync("/api/nominations", body)).StatusCode);
+        var tokens = await Login(client, await host.Account(false, role)); Bearer(client, tokens.AccessToken);
+        Assert.AreEqual(HttpStatusCode.Forbidden, (await client.GetAsync("/api/nominations/active-campaign")).StatusCode);
+        Assert.AreEqual(HttpStatusCode.Forbidden, (await client.GetAsync("/api/nominations/candidates?term=007")).StatusCode);
+        Assert.AreEqual(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync("/api/nominations", body)).StatusCode);
+    }
+
+    [TestMethod]
+    public async Task NominationHttp_BlocksTemporaryAndDisabledSponsors()
+    {
+        using var host = new Host(); using var client = host.Client();
+        var account = await host.Sponsor(true); var tokens = await Login(client, account); Bearer(client, tokens.AccessToken);
+        var body = new { candidateEmployeeId = Guid.NewGuid(), qualities = 1, justification = "Texto" };
+        Assert.AreEqual(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync("/api/nominations", body)).StatusCode);
+        host.Store.Users[account.Account.Id].MustChangePassword = false;
+        host.Store.Users[account.Account.Id].IsActive = false;
+        Assert.AreEqual(HttpStatusCode.Unauthorized, (await client.PostAsJsonAsync("/api/nominations", body)).StatusCode);
+        Assert.AreEqual(0, host.Nominations.Nominations.Count);
+    }
+
+    [TestMethod]
+    public async Task NominationHttp_ClosedCampaignAndPersistenceErrors_AreControlled()
+    {
+        using var host = new Host(); using var client = host.Client();
+        var tokens = await Login(client, await host.Sponsor()); Bearer(client, tokens.AccessToken);
+        var candidate = new EmployeeDto(Guid.NewGuid(), "123", "Luis", ""); host.Store.Employees.Add(candidate.Id, candidate);
+        var body = new { candidateEmployeeId = candidate.Id, qualities = 1, justification = "Texto" };
+        Assert.AreEqual(HttpStatusCode.Conflict, (await client.GetAsync("/api/nominations/active-campaign")).StatusCode);
+        Assert.AreEqual(HttpStatusCode.Conflict, (await client.PostAsJsonAsync("/api/nominations", body)).StatusCode);
+        Assert.AreEqual(HttpStatusCode.BadRequest, (await client.GetAsync("/api/nominations/candidates?term=Luis&pageSize=101")).StatusCode);
+        var campaign = new EmpleadoDelMes.Domain.Entities.Campaign(Guid.NewGuid(), new(2026, 10, 1), DateTimeOffset.UtcNow);
+        campaign.OpenNominations(); host.Campaigns.Campaigns.Add(campaign.EvaluationMonth, campaign);
+        host.Nominations.FailSave = true;
+        var response = await client.PostAsJsonAsync("/api/nominations", body);
+        Assert.AreEqual(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.IsFalse((await response.Content.ReadAsStringAsync()).Contains("SQL"));
+        Assert.AreEqual(0, host.Nominations.Nominations.Count);
+    }
 
     [TestMethod]
     [DataRow("nominations/schedule", true)]

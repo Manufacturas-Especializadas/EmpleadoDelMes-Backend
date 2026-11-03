@@ -1,6 +1,9 @@
 using EmpleadoDelMes.Application.Accounts;
 using EmpleadoDelMes.Application.Campaigns;
+using EmpleadoDelMes.Application.Candidates;
 using EmpleadoDelMes.Application.Nominations;
+using EmpleadoDelMes.Application.Preselections;
+using EmpleadoDelMes.Application.Opinions;
 using EmpleadoDelMes.Application.Employees;
 using EmpleadoDelMes.Infrastructure.Employees;
 using EmpleadoDelMes.Infrastructure.Identity;
@@ -54,6 +57,14 @@ public static class DependencyInjection
         services.AddScoped<CampaignService>();
         services.AddScoped<INominationRepository, NominationRepository>();
         services.AddScoped<NominationService>();
+        services.AddScoped<INominationAdminRepository, NominationAdminRepository>();
+        services.AddScoped<NominationAdminService>();
+        services.AddScoped<IPreselectionRepository, PreselectionRepository>();
+        services.AddScoped<PreselectionService>();
+        services.AddScoped<IOpinionRepository, OpinionRepository>();
+        services.AddScoped<OpinionService>();
+        services.AddScoped<ICandidateReviewRepository, CandidateReviewRepository>();
+        services.AddScoped<CandidateReviewService>();
         services.AddScoped<IEmployeeRepository, EmployeeRepository>();
         services.AddScoped<EmployeeService>();
         services.AddScoped<IdentityAccountService>();
