@@ -145,4 +145,33 @@ public sealed class UsersController(
                 "Inténtalo nuevamente."
         });
     }
+
+
+    public sealed record ChangeSponsorStatusRequest(
+        bool? IsActive);
+
+    [HttpPatch("{id:guid}/status")]
+    public async Task<IActionResult> ChangeStatus(
+        Guid id,
+        [FromBody] ChangeSponsorStatusRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request.IsActive is null)
+        {
+            return BadRequest(new
+            {
+                message = "Indica si la cuenta debe estar activa."
+            });
+        }
+
+        var result = await accountService.SetSponsorActiveAsync(
+            id,
+            request.IsActive.Value,
+            cancellationToken);
+
+        return result.IsSuccess
+            ? Ok(result.Value)
+            : Error(result);
+    }
+
 }

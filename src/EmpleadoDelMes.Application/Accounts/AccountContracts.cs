@@ -11,7 +11,13 @@ public static class AccountRoles
         role is Administrator or HumanResources or Safety or Quality;
 }
 public enum AccountError { Validation, NotFound, Duplicate, InvalidCredentials, Concurrency, Persistence }
-public sealed record AccountInfo(Guid Id, string UserName, Guid? EmployeeId, bool MustChangePassword, IReadOnlyList<string> Roles);
+public sealed record AccountInfo(
+    Guid Id,
+    string UserName,
+    Guid? EmployeeId,
+    bool MustChangePassword,
+    IReadOnlyList<string> Roles,
+    bool IsActive = true);
 public sealed record AccountResult<T>(T? Value, AccountError? Error = null, string? Message = null)
 {
     public bool IsSuccess => Error is null;
@@ -30,6 +36,10 @@ public interface IAccountService
     Task<AccountResult<AccountInfo>> ValidateCredentialsAsync(string userName, string password, CancellationToken cancellationToken = default);
     Task<AccountResult<AccountInfo>> GetAccountAsync(Guid id, CancellationToken cancellationToken = default);
     Task<AccountResult<AccountInfo>> ChangePasswordAsync(Guid id, string currentPassword, string newPassword, CancellationToken cancellationToken = default);
+    Task<AccountResult<AccountInfo>> SetSponsorActiveAsync(
+    Guid id,
+    bool isActive,
+    CancellationToken cancellationToken = default);
 }
 
 
@@ -39,7 +49,9 @@ public sealed record AccountListItem(
     Guid? EmployeeId,
     string? EmployeeFullName,
     bool MustChangePassword,
-    IReadOnlyList<string> Roles);
+    IReadOnlyList<string> Roles,
+    bool IsActive = true);
+
 
 public sealed record AccountPage(
     IReadOnlyList<AccountListItem> Items,

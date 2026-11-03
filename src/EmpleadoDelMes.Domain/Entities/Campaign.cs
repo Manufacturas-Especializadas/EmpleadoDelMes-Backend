@@ -29,11 +29,13 @@ public sealed class Campaign
 
     public void ScheduleNominations(DateTimeOffset openingAt, DateTimeOffset closingAt)
     {
+        EnsureNotArchived();
         NominationPeriod = NominationPeriod.WithSchedule(openingAt, closingAt);
     }
 
     public void ScheduleOpinions(DateTimeOffset openingAt, DateTimeOffset closingAt)
     {
+        EnsureNotArchived();
         OpinionPeriod = OpinionPeriod.WithSchedule(openingAt, closingAt);
     }
 

@@ -12,5 +12,8 @@ public sealed class ApplicationUserConfiguration : IEntityTypeConfiguration<Appl
         builder.HasOne<Employee>().WithOne().HasForeignKey<ApplicationUser>(x => x.EmployeeId)
             .IsRequired(false).OnDelete(DeleteBehavior.NoAction);
         builder.HasIndex(x => x.EmployeeId).IsUnique().HasFilter("[EmployeeId] IS NOT NULL");
+        builder.Property(user => user.IsActive)
+    .IsRequired()
+    .HasDefaultValue(true);
     }
 }

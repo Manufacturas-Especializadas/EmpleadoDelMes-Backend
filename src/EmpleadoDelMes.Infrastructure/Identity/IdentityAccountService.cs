@@ -46,8 +46,13 @@ public sealed class IdentityAccountService(
     string role,
     CancellationToken token,
     bool passwordIsPayroll = false) =>
-        transactions.RunAsync(async () =>
-        {
+        transactions.RunAsync(() => CreateCore(name, employeeId, role, passwordIsPayroll), token);
+
+    internal Task<AccountResult<CreatedAccount>> CreateSponsorInTransactionAsync(SponsorImportEmployee employee) =>
+        CreateCore(employee.PayrollNumber, employee.Id, AccountRoles.Sponsor, true);
+
+    private async Task<AccountResult<CreatedAccount>> CreateCore(string name, Guid? employeeId, string role, bool passwordIsPayroll)
+    {
             // El índice único de EmployeeId también protege frente a carreras y cuentas con otro nombre.
             if (await users.FindByNameAsync(name) is not null)
                 return Fail<CreatedAccount>(AccountError.Duplicate, employeeId.HasValue
@@ -60,7 +65,7 @@ public sealed class IdentityAccountService(
             var user = new ApplicationUser
             {
                 Id = Guid.NewGuid(), UserName = name, EmployeeId = employeeId,
-                MustChangePassword = true, LockoutEnabled = true
+                MustChangePassword = true, LockoutEnabled = true, IsActive = true
             };
             var password = passwordIsPayroll
                 ? name
@@ -82,7 +87,7 @@ public sealed class IdentityAccountService(
             var assigned = await users.AddToRoleAsync(user, role);
             if (!assigned.Succeeded) return IdentityFailure<CreatedAccount>(assigned);
             return new AccountResult<CreatedAccount>(new CreatedAccount(await Info(user), password));
-        }, token);
+    }
 
     public Task<AccountResult<AccountInfo>> GetAccountAsync(Guid id, CancellationToken cancellationToken = default) =>
         Guard(async () =>
@@ -107,6 +112,8 @@ public sealed class IdentityAccountService(
     private async Task<bool> CheckCredentials(ApplicationUser user, string password)
     {
         if (await users.IsLockedOutAsync(user)) return false;
+        if (!user.IsActive)
+            return false;
         if (!await users.CheckPasswordAsync(user, password))
         {
             // Identity aplica el umbral, incrementa el contador y establece el bloqueo.
@@ -145,8 +152,15 @@ public sealed class IdentityAccountService(
         }, cancellationToken);
     });
 
-    private async Task<AccountInfo> Info(ApplicationUser user) => new(user.Id, user.UserName!, user.EmployeeId,
-        user.MustChangePassword, (await users.GetRolesAsync(user)).Order().ToArray());
+    private async Task<AccountInfo> Info(ApplicationUser user) =>
+    new(
+        user.Id,
+        user.UserName!,
+        user.EmployeeId,
+        user.MustChangePassword,
+        (await users.GetRolesAsync(user)).Order().ToArray(),
+        user.IsActive
+    );
 
     private static AccountResult<T> IdentityFailure<T>(IdentityResult result)
     {
@@ -160,9 +174,13 @@ public sealed class IdentityAccountService(
         return Fail<T>(AccountError.Validation, "No pudimos completar la operación. Revisa los datos de la cuenta.");
     }
 
-    private static async Task<AccountResult<T>> Guard<T>(Func<Task<AccountResult<T>>> operation)
+    internal static async Task<AccountResult<T>> Guard<T>(Func<Task<AccountResult<T>>> operation)
     {
         try { return await operation(); }
+        catch (SqlException ex) when (ex.Number is 2601 or 2627 or 1205)
+        { return Fail<T>(AccountError.Concurrency, "La información cambió durante la operación. Vuelve a consultar la vista previa."); }
+        catch (DbUpdateException ex) when (ex.InnerException is SqlException { Number: 1205 })
+        { return Fail<T>(AccountError.Concurrency, "La información cambió durante la operación. Vuelve a consultar la vista previa."); }
         catch (DbUpdateException ex) when (ex.InnerException is SqlException { Number: 2601 or 2627 })
         { return Fail<T>(AccountError.Duplicate, "Este empleado o nombre de usuario ya tiene una cuenta registrada."); }
         catch (DbUpdateConcurrencyException)
@@ -173,4 +191,63 @@ public sealed class IdentityAccountService(
     }
     private static AccountResult<T> StorageFailure<T>() => Fail<T>(AccountError.Persistence,
         "No pudimos completar la operación. Inténtalo nuevamente.");
+
+
+    public Task<AccountResult<AccountInfo>> SetSponsorActiveAsync(
+        Guid id,
+        bool isActive,
+        CancellationToken cancellationToken = default) =>
+        Guard(async () =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (id == Guid.Empty)
+            {
+                return Fail<AccountInfo>(
+                    AccountError.Validation,
+                    "Selecciona una cuenta válida.");
+            }
+
+            var user = await users.FindByIdAsync(id.ToString());
+
+            if (user is null)
+            {
+                return Fail<AccountInfo>(
+                    AccountError.NotFound,
+                    "No encontramos la cuenta.");
+            }
+
+            var assignedRoles = await users.GetRolesAsync(user);
+
+            // Solo permitimos cambiar el estado de cuentas Sponsor.
+            if (assignedRoles.Count != 1 ||
+                assignedRoles[0] != AccountRoles.Sponsor)
+            {
+                return Fail<AccountInfo>(
+                    AccountError.Validation,
+                    "Solo puedes cambiar el estado de cuentas de patrocinadores.");
+            }
+
+            // Evitar escrituras innecesarias.
+            if (user.IsActive == isActive)
+            {
+                return new AccountResult<AccountInfo>(
+                    await Info(user));
+            }
+
+            user.IsActive = isActive;
+
+            // Guarda el cambio y renueva el security stamp.
+            // Los tokens anteriores dejan de ser válidos.
+            var updated = await users.UpdateSecurityStampAsync(user);
+
+            if (!updated.Succeeded)
+            {
+                return IdentityFailure<AccountInfo>(updated);
+            }
+
+            return new AccountResult<AccountInfo>(
+                await Info(user));
+        });
+
 }

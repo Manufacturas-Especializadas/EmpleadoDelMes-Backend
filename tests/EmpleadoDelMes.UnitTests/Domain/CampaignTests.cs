@@ -7,6 +7,20 @@ namespace EmpleadoDelMes.UnitTests.Domain;
 [TestClass]
 public sealed class CampaignTests
 {
+    [TestMethod]
+    public void ArchivedCampaign_RejectsScheduleChangesAndPreservesBothPeriods()
+    {
+        var campaign = Create();
+        campaign.ScheduleNominations(Now, Now.AddHours(1));
+        campaign.ScheduleOpinions(Now, Now.AddHours(2));
+        campaign.Archive();
+        var nominations = campaign.NominationPeriod;
+        var opinions = campaign.OpinionPeriod;
+        Assert.Throws<InvalidOperationException>(() => campaign.ScheduleNominations(Now, Now.AddDays(1)));
+        Assert.Throws<InvalidOperationException>(() => campaign.ScheduleOpinions(Now, Now.AddDays(1)));
+        Assert.AreSame(nominations, campaign.NominationPeriod);
+        Assert.AreSame(opinions, campaign.OpinionPeriod);
+    }
     private static readonly DateTimeOffset Now = new(2026, 10, 29, 12, 0, 0, TimeSpan.Zero);
 
     private static Campaign Create() => new(Guid.NewGuid(), new DateOnly(2026, 10, 29), Now);

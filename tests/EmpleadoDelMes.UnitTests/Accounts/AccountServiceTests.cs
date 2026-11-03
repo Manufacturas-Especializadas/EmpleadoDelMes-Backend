@@ -47,7 +47,10 @@ public sealed class AccountServiceTests
         Assert.IsTrue((await service.ValidateCredentialsAsync(payroll, created.TemporaryPassword)).IsSuccess);
         Assert.AreEqual(AccountError.Duplicate, (await service.CreateSponsorAsync(employee.Id)).Error);
         Assert.AreEqual(1, store.Users.Count);
-        Assert.IsFalse((await service.GetAccountAsync(created.Account.Id)).Value!.ToString().Contains(created.TemporaryPassword));
+        // Payroll is also the public UserName; check secret fields instead of its value.
+        var publicAccount = System.Text.Json.JsonSerializer.SerializeToElement((await service.GetAccountAsync(created.Account.Id)).Value!);
+        Assert.IsFalse(publicAccount.TryGetProperty("TemporaryPassword", out _));
+        Assert.IsFalse(publicAccount.TryGetProperty("PasswordHash", out _));
     }
 
     [TestMethod]

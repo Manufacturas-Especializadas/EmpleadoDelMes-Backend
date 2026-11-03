@@ -14,8 +14,14 @@ public sealed class SessionValidation(UserManager<ApplicationUser> users,
         if (!Guid.TryParse(id, out _)) return null;
         var user = await users.FindByIdAsync(id);
         var stamp = principal.FindFirstValue(users.Options.ClaimsIdentity.SecurityStampClaimType);
-        if (user is null || string.IsNullOrEmpty(stamp) ||
-            stamp != await users.GetSecurityStampAsync(user) || await users.IsLockedOutAsync(user)) return null;
+        if (user is null ||
+            !user.IsActive ||
+            string.IsNullOrEmpty(stamp) ||
+            stamp != await users.GetSecurityStampAsync(user) ||
+            await users.IsLockedOutAsync(user))
+        {
+            return null;
+        }
         return user;
     }
 

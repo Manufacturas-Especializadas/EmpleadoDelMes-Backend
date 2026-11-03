@@ -20,6 +20,8 @@ internal sealed class AccountTestStore : IUserPasswordStore<ApplicationUser>, IU
     internal Dictionary<Guid, List<(string Type, string Value)>> RoleClaims = [];
     internal bool FailMarker;
     internal bool FailAssignment;
+    internal int FailAssignmentAtUserCount;
+    internal int TransactionCalls;
     internal bool FailFlagUpdate;
     internal int Rollbacks;
     private static T Clone<T>(T value) => JsonSerializer.Deserialize<T>(JsonSerializer.Serialize(value))!;
@@ -60,7 +62,8 @@ internal sealed class AccountTestStore : IUserPasswordStore<ApplicationUser>, IU
     public Task SetLockoutEnabledAsync(ApplicationUser u, bool enabled, CancellationToken c) { u.LockoutEnabled = enabled; return Task.CompletedTask; }
     public Task AddToRoleAsync(ApplicationUser u, string role, CancellationToken c)
     {
-        if (FailAssignment) throw new Microsoft.EntityFrameworkCore.DbUpdateException("Detalle interno");
+        if (FailAssignment || FailAssignmentAtUserCount > 0 && Users.Count == FailAssignmentAtUserCount)
+            throw new Microsoft.EntityFrameworkCore.DbUpdateException("Detalle interno");
         if (!Memberships.TryGetValue(u.Id, out var list)) Memberships[u.Id] = list = [];
         list.Add(role);
         return Task.CompletedTask;
@@ -93,11 +96,17 @@ internal sealed class AccountTestStore : IUserPasswordStore<ApplicationUser>, IU
     public Task RemoveClaimAsync(IdentityRole<Guid> r, Claim claim, CancellationToken c) => throw new NotSupportedException();
     public Task<EmployeeDto?> GetByIdAsync(Guid id, CancellationToken c) => Task.FromResult(Employees.GetValueOrDefault(id));
     public Task<EmployeeDto?> GetByPayrollNumberAsync(string number, CancellationToken c) => throw new NotSupportedException();
-    public Task<EmployeePage> SearchAsync(string term, int page, int size, CancellationToken c) => throw new NotSupportedException();
+    public Task<EmployeePage> SearchAsync(string term, int page, int size, CancellationToken c)
+    {
+        var rows = Employees.Values.Where(e => e.PayrollNumber.Contains(term, StringComparison.OrdinalIgnoreCase) ||
+            e.FullName.Contains(term, StringComparison.OrdinalIgnoreCase)).OrderBy(e => e.PayrollNumber).ThenBy(e => e.Id).ToArray();
+        return Task.FromResult(new EmployeePage(rows.Skip((page - 1) * size).Take(size).ToArray(), rows.Length, page, size));
+    }
     public Task<EmployeeDto> CreateAsync(Employee employee, CancellationToken c) => throw new NotSupportedException();
     public Task<EmployeeDto> UpdateNameAsync(Employee employee, byte[] version, CancellationToken c) => throw new NotSupportedException();
     public async Task<AccountResult<T>> RunAsync<T>(Func<Task<AccountResult<T>>> operation, CancellationToken c)
     {
+        TransactionCalls++;
         var users = Clone(Users); var roles = Clone(Roles); var memberships = Clone(Memberships);
         var roleClaims = RoleClaims.ToDictionary(p => p.Key, p => p.Value.ToList());
         var success = false;

@@ -3,6 +3,8 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using EmpleadoDelMes.Application.Accounts;
+using EmpleadoDelMes.Application.Campaigns;
+using EmpleadoDelMes.UnitTests.Campaigns;
 using EmpleadoDelMes.Application.Employees;
 using EmpleadoDelMes.Infrastructure.Identity;
 using EmpleadoDelMes.UnitTests.Accounts;
@@ -16,6 +18,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace EmpleadoDelMes.UnitTests.Authentication;
@@ -41,17 +44,22 @@ public sealed class AuthHttpTests
     private sealed class Host : WebApplicationFactory<Program>
     {
         internal readonly AccountTestStore Store = new();
+        internal readonly CampaignTestRepository Campaigns = new();
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseEnvironment("Testing");
+            // Keep test diagnostics in-process; never write to the Windows Event Log.
+            builder.ConfigureLogging(logging => logging.ClearProviders().AddConsole());
             builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(
-                new Dictionary<string, string?> { ["AdminBootstrap:Enabled"] = "false" }));
+                new Dictionary<string, string?> { ["AdminBootstrap:Enabled"] = "false", ["CampaignAutomation:Enabled"] = "false" }));
             builder.ConfigureServices(services =>
             {
                 services.AddSingleton<IUserStore<ApplicationUser>>(Store);
                 services.AddSingleton<IRoleStore<IdentityRole<Guid>>>(Store);
                 services.AddSingleton<IEmployeeRepository>(Store);
                 services.AddSingleton<IAccountTransactionRunner>(Store);
+                services.AddSingleton<ICampaignRepository>(Campaigns);
+                services.AddSingleton<ISponsorImportDirectory>(new SponsorTestDirectory(Store));
                 services.AddControllers().AddApplicationPart(typeof(AuthorizationProbeController).Assembly);
             });
         }
@@ -77,6 +85,195 @@ public sealed class AuthHttpTests
         return tokens;
     }
     private static void Bearer(HttpClient client, string token) => client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+    [TestMethod]
+    [DataRow("nominations/schedule", true)]
+    [DataRow("opinions/schedule", true)]
+    [DataRow("nominations/open", false)]
+    [DataRow("nominations/close", false)]
+    [DataRow("nominations/automatic", false)]
+    [DataRow("opinions/open", false)]
+    [DataRow("opinions/close", false)]
+    [DataRow("opinions/automatic", false)]
+    [DataRow("archive", false)]
+    [DataRow("reopen", false)]
+    public async Task CampaignMutations_RequireAdministratorAndChangedPassword(string action, bool put)
+    {
+        using var host = new Host(); using var client = host.Client();
+        var path = $"/api/campaigns/{Guid.NewGuid()}/{action}";
+        Task<HttpResponseMessage> Send() => put ? client.PutAsJsonAsync(path, new { }) : client.PostAsJsonAsync(path, new { });
+        Assert.AreEqual(HttpStatusCode.Unauthorized, (await Send()).StatusCode);
+        var account = await host.Account(true); var tokens = await Login(client, account); Bearer(client, tokens.AccessToken);
+        Assert.AreEqual(HttpStatusCode.Forbidden, (await Send()).StatusCode);
+        host.Store.Users[account.Account.Id].MustChangePassword = false;
+        host.Store.Memberships[account.Account.Id].Clear();
+        Assert.AreEqual(HttpStatusCode.Forbidden, (await Send()).StatusCode);
+    }
+
+    [TestMethod]
+    [DataRow(AccountRoles.Sponsor)]
+    [DataRow(AccountRoles.HumanResources)]
+    [DataRow(AccountRoles.Safety)]
+    [DataRow(AccountRoles.Quality)]
+    public async Task CampaignMutations_DenyEveryOtherFunctionalRole(string role)
+    {
+        using var host = new Host(); using var client = host.Client();
+        var account = await host.Account(false); var tokens = await Login(client, account); Bearer(client, tokens.AccessToken);
+        using var scope = host.Services.CreateScope();
+        await scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole<Guid>>>().CreateAsync(new IdentityRole<Guid>(role) { Id = Guid.NewGuid() });
+        host.Store.Memberships[account.Account.Id] = [role.ToUpperInvariant()];
+        Assert.AreEqual(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync($"/api/campaigns/{Guid.NewGuid()}/archive", new { })).StatusCode);
+    }
+
+    [TestMethod]
+    public async Task CampaignMutations_ScheduleUtc_UpdateVersion_AndReturnControlledErrors()
+    {
+        using var host = new Host(); using var client = host.Client();
+        var tokens = await Login(client, await host.Account(false)); Bearer(client, tokens.AccessToken);
+        var campaign = new EmpleadoDelMes.Domain.Entities.Campaign(Guid.NewGuid(), new(2026, 10, 1), DateTimeOffset.UtcNow);
+        host.Campaigns.Campaigns.Add(campaign.EvaluationMonth, campaign);
+        var path = $"/api/campaigns/{campaign.Id}";
+        var initial = await client.GetFromJsonAsync<JsonElement>(path);
+        var version = initial.GetProperty("version").GetString();
+        var scheduled = await client.PutAsJsonAsync(path + "/nominations/schedule", new
+        {
+            version, openingAt = "2026-11-03T06:00:00-06:00", closingAt = "2026-11-03T07:00:00-06:00"
+        });
+        Assert.AreEqual(HttpStatusCode.OK, scheduled.StatusCode, await scheduled.Content.ReadAsStringAsync());
+        var current = await scheduled.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.AreEqual(new DateTimeOffset(2026, 11, 3, 12, 0, 0, TimeSpan.Zero),
+            current.GetProperty("nominationPeriod").GetProperty("scheduledOpeningAtUtc").GetDateTimeOffset());
+        Assert.AreNotEqual(version, current.GetProperty("version").GetString());
+        Assert.AreEqual(HttpStatusCode.Conflict, (await client.PostAsJsonAsync(path + "/archive", new { version })).StatusCode);
+        version = current.GetProperty("version").GetString();
+        var opened = await client.PostAsJsonAsync(path + "/nominations/open", new { version });
+        Assert.AreEqual(HttpStatusCode.OK, opened.StatusCode);
+        current = await opened.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.IsTrue(current.GetProperty("canAcceptNominations").GetBoolean());
+        version = current.GetProperty("version").GetString();
+        Assert.AreEqual(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync(path + "/archive", new { })).StatusCode);
+        Assert.AreEqual(HttpStatusCode.NotFound,
+            (await client.PostAsJsonAsync($"/api/campaigns/{Guid.NewGuid()}/archive", new { version })).StatusCode);
+        host.Campaigns.FailSave = true;
+        Assert.AreEqual(HttpStatusCode.ServiceUnavailable, (await client.PostAsJsonAsync(path + "/archive", new { version })).StatusCode);
+        var afterFailure = await client.GetFromJsonAsync<JsonElement>(path);
+        Assert.IsTrue(afterFailure.GetProperty("canAcceptNominations").GetBoolean());
+        Assert.IsFalse(afterFailure.GetProperty("isArchived").GetBoolean());
+    }
+
+    [TestMethod]
+    [DataRow("2026-11-03T06:00:00", "2026-11-03T07:00:00")]
+    [DataRow("2026-11-03T06:00:00Z", "2026-11-03T07:00:00")]
+    [DataRow("2026-11-03", "2026-11-04")]
+    [DataRow("2026-11-03T06:00:00Z", "2026-11-03T06:00:00Z")]
+    public async Task CampaignSchedule_InvalidOrMissingOffsets_Return400WithoutSaving(string openingAt, string closingAt)
+    {
+        using var host = new Host(); using var client = host.Client();
+        var tokens = await Login(client, await host.Account(false)); Bearer(client, tokens.AccessToken);
+        var campaign = new EmpleadoDelMes.Domain.Entities.Campaign(Guid.NewGuid(), new(2026, 10, 1), DateTimeOffset.UtcNow);
+        host.Campaigns.Campaigns.Add(campaign.EvaluationMonth, campaign);
+        var before = host.Campaigns.ToDto(campaign);
+        var response = await client.PutAsJsonAsync($"/api/campaigns/{campaign.Id}/opinions/schedule",
+            new { before.Version, openingAt, closingAt });
+        Assert.AreEqual(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.AreEqual(before, host.Campaigns.ToDto(host.Campaigns.Campaigns[campaign.EvaluationMonth]));
+    }
+
+    [TestMethod]
+    [DataRow("/api/campaigns")]
+    [DataRow("/api/campaigns/00000000-0000-0000-0000-000000000001")]
+    public async Task CampaignEndpoints_RequireAdministratorAndChangedPassword(string path)
+    {
+        using var host = new Host(); using var client = host.Client();
+        Assert.AreEqual(HttpStatusCode.Unauthorized, (await client.GetAsync(path)).StatusCode);
+        var account = await host.Account(true);
+        var tokens = await Login(client, account); Bearer(client, tokens.AccessToken);
+        Assert.AreEqual(HttpStatusCode.Forbidden, (await client.GetAsync(path)).StatusCode);
+        host.Store.Users[account.Account.Id].MustChangePassword = false;
+        host.Store.Memberships[account.Account.Id].Clear();
+        Assert.AreEqual(HttpStatusCode.Forbidden, (await client.GetAsync(path)).StatusCode);
+    }
+
+    [TestMethod]
+    public async Task CampaignEndpoints_ReturnDetailsPaginationAndControlledErrors()
+    {
+        using var host = new Host(); using var client = host.Client();
+        var tokens = await Login(client, await host.Account(false)); Bearer(client, tokens.AccessToken);
+        var campaign = new EmpleadoDelMes.Domain.Entities.Campaign(Guid.NewGuid(), new DateOnly(2026, 10, 1), DateTimeOffset.UtcNow);
+        host.Campaigns.Campaigns.Add(campaign.EvaluationMonth, campaign);
+        var page = await client.GetFromJsonAsync<JsonElement>("/api/campaigns?pageNumber=1&pageSize=1");
+        Assert.AreEqual(1, page.GetProperty("total").GetInt32());
+        Assert.AreEqual("2026-10-01", page.GetProperty("items")[0].GetProperty("evaluationMonth").GetString());
+        var detail = await client.GetFromJsonAsync<JsonElement>($"/api/campaigns/{campaign.Id}");
+        Assert.AreEqual(campaign.Id, detail.GetProperty("id").GetGuid());
+        Assert.AreEqual(2, detail.GetProperty("nominationPeriod").GetProperty("mode").GetInt32());
+        Assert.AreEqual(JsonValueKind.Null, detail.GetProperty("opinionPeriod").GetProperty("scheduledOpeningAtUtc").ValueKind);
+        Assert.AreEqual(HttpStatusCode.NotFound, (await client.GetAsync($"/api/campaigns/{Guid.NewGuid()}")).StatusCode);
+        foreach (var path in new[] { "/api/campaigns/not-a-guid", $"/api/campaigns/{Guid.Empty}",
+            "/api/campaigns?pageNumber=0", "/api/campaigns?pageSize=101", "/api/campaigns?pageNumber=invalid" })
+            Assert.AreEqual(HttpStatusCode.BadRequest, (await client.GetAsync(path)).StatusCode);
+        Assert.AreEqual(0, host.Campaigns.CreateCalls);
+    }
+
+    private static MultipartFormDataContent SponsorFile(bool confirm = false, string name = "sponsors.xlsx")
+    {
+        using var file = SponsorImportTests.Excel(("007", "Ana Pérez"));
+        var content = new MultipartFormDataContent();
+        content.Add(new ByteArrayContent(file.ToArray()), "file", name);
+        content.Add(new StringContent(confirm ? "true" : "false"), "confirm");
+        return content;
+    }
+
+    [TestMethod]
+    [DataRow("preview")]
+    [DataRow("confirm")]
+    public async Task SponsorImports_RequireAdministratorAndDefinitivePassword(string action)
+    {
+        using var host = new Host(); using var client = host.Client();
+        using var file = SponsorFile(true);
+        Assert.AreEqual(HttpStatusCode.Unauthorized, (await client.PostAsync($"/api/users/import/sponsors/{action}", file)).StatusCode);
+        var account = await host.Account(true); var tokens = await Login(client, account); Bearer(client, tokens.AccessToken);
+        Assert.AreEqual(HttpStatusCode.Forbidden, (await client.PostAsync($"/api/users/import/sponsors/{action}", file)).StatusCode);
+        host.Store.Users[account.Account.Id].MustChangePassword = false;
+        host.Store.Memberships[account.Account.Id].Clear();
+        Assert.AreEqual(HttpStatusCode.Forbidden, (await client.PostAsync($"/api/users/import/sponsors/{action}", file)).StatusCode);
+    }
+
+    [TestMethod]
+    public async Task SponsorImports_HttpPreviewConfirmAndIdempotence_DoNotDiscloseCredentials()
+    {
+        using var host = new Host(); using var client = host.Client();
+        var account = await host.Account(false); var tokens = await Login(client, account); Bearer(client, tokens.AccessToken);
+        var employee = new EmployeeDto(Guid.NewGuid(), "007", "Ana Pérez", ""); host.Store.Employees.Add(employee.Id, employee);
+        using var file = SponsorFile();
+        var preview = await client.PostAsync("/api/users/import/sponsors/preview", file);
+        Assert.AreEqual(HttpStatusCode.OK, preview.StatusCode);
+        Assert.AreEqual(1, (await preview.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("newAccounts").GetInt32());
+        Assert.AreEqual(1, host.Store.Users.Count);
+        Assert.AreEqual(HttpStatusCode.BadRequest, (await client.PostAsync("/api/users/import/sponsors/confirm", file)).StatusCode);
+        using var confirmed = SponsorFile(true);
+        var response = await client.PostAsync("/api/users/import/sponsors/confirm", confirmed);
+        Assert.AreEqual(HttpStatusCode.OK, response.StatusCode);
+        var json = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.AreEqual(1, json.GetProperty("createdAccounts").GetInt32());
+        Assert.IsFalse(json.ToString().Contains("password", StringComparison.OrdinalIgnoreCase));
+        Assert.IsFalse(json.ToString().Contains("token", StringComparison.OrdinalIgnoreCase));
+        var second = await client.PostAsync("/api/users/import/sponsors/confirm", confirmed);
+        Assert.AreEqual(1, (await second.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("skippedAccounts").GetInt32());
+        Assert.AreEqual(2, host.Store.Users.Count);
+    }
+
+    [TestMethod]
+    public async Task SponsorImports_RejectWrongExtensionAndOversizedFile()
+    {
+        using var host = new Host(); using var client = host.Client();
+        var tokens = await Login(client, await host.Account(false)); Bearer(client, tokens.AccessToken);
+        using var wrong = SponsorFile(name: "sponsors.csv");
+        Assert.AreEqual(HttpStatusCode.BadRequest, (await client.PostAsync("/api/users/import/sponsors/preview", wrong)).StatusCode);
+        using var oversized = new MultipartFormDataContent();
+        oversized.Add(new ByteArrayContent(new byte[5 * 1024 * 1024 + 1]), "file", "sponsors.xlsx");
+        Assert.AreEqual(HttpStatusCode.BadRequest, (await client.PostAsync("/api/users/import/sponsors/preview", oversized)).StatusCode);
+    }
 
     [TestMethod]
     public async Task LoginAndMe_ReturnCurrentAccountWithoutSecrets()

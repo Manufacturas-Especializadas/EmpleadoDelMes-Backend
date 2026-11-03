@@ -1,11 +1,15 @@
 using EmpleadoDelMes.Application.Accounts;
+using EmpleadoDelMes.Application.Campaigns;
+using EmpleadoDelMes.Application.Nominations;
 using EmpleadoDelMes.Application.Employees;
+using EmpleadoDelMes.Infrastructure.Employees;
 using EmpleadoDelMes.Infrastructure.Identity;
 using EmpleadoDelMes.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace EmpleadoDelMes.Infrastructure;
 
@@ -45,15 +49,27 @@ public static class DependencyInjection
             .AddRoles<IdentityRole<Guid>>()
             .AddEntityFrameworkStores<ApplicationDbContext>();
 
+        services.TryAddSingleton(TimeProvider.System);
+        services.AddScoped<ICampaignRepository, CampaignRepository>();
+        services.AddScoped<CampaignService>();
+        services.AddScoped<INominationRepository, NominationRepository>();
+        services.AddScoped<NominationService>();
         services.AddScoped<IEmployeeRepository, EmployeeRepository>();
         services.AddScoped<EmployeeService>();
-        services.AddScoped<IAccountService, IdentityAccountService>();
+        services.AddScoped<IdentityAccountService>();
+        services.AddScoped<IAccountService>(provider => provider.GetRequiredService<IdentityAccountService>());
+        services.AddScoped<ISponsorImportDirectory, SponsorImportDirectory>();
+        services.AddScoped<ISponsorImportStore, SponsorImportStore>();
+        services.AddScoped<SponsorImportService>();
         services.AddScoped<IAccountDirectory, AccountDirectory>();
         services.AddScoped<IAccountTransactionRunner, AccountTransactionRunner>();
         services.AddSingleton<TemporaryPasswordGenerator>();
         services.AddScoped<AdminBootstrapInitializer>();
         services.AddScoped<IAdminBootstrapTransaction, AdminBootstrapTransaction>();
         services.AddSingleton<AdminBootstrapStartup>();
+        services.AddScoped<IEmployeeExcelReader, ClosedXmlEmployeeReader>();
+        services.AddScoped<EmployeeImportPreviewService>();
+        services.AddScoped<IEmployeeImportStore, EmployeeImportStore>();
         return services;
     }
 }
