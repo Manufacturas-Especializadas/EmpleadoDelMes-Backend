@@ -132,7 +132,9 @@ app.UseStatusCodePages(async context =>
 });
 
 // 6. Documentación solo en desarrollo
-if (app.Environment.IsDevelopment())
+var enableSwagger = app.Configuration.GetValue<bool>("Swagger:Enabled");
+
+if (app.Environment.IsDevelopment() || enableSwagger)
 {
     app.MapOpenApi().AllowAnonymous();
 
