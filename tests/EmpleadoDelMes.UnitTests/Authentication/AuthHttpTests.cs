@@ -101,6 +101,101 @@ public sealed class AuthHttpTests
     }
     private static void Bearer(HttpClient client, string token) => client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
+    private sealed class OpinionCampaignClock : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => new(2026, 11, 4, 12, 0, 0, TimeSpan.Zero);
+    }
+
+    [TestMethod]
+    [DataRow(AccountRoles.HumanResources)]
+    [DataRow(AccountRoles.Safety)]
+    [DataRow(AccountRoles.Quality)]
+    public async Task OpinionCampaigns_DepartmentsReceiveMinimalOrderedPage(string role)
+    {
+        using var host = new Host(); using var client = host.Client();
+        Bearer(client, (await Login(client, await host.Account(false, role))).AccessToken);
+        host.Campaigns.Clock = new OpinionCampaignClock();
+        var now = host.Campaigns.Clock.GetUtcNow();
+        for (var month = 1; month <= 4; month++)
+        {
+            var campaign = new EmpleadoDelMes.Domain.Entities.Campaign(Guid.NewGuid(), new(2026, month, 1), now);
+            if (month == 4) campaign.OpenOpinions();
+            if (month == 3) { campaign.OpenOpinions(); campaign.Archive(); }
+            if (month == 1)
+            {
+                campaign.ScheduleOpinions(now.AddHours(-1), now.AddHours(1));
+                campaign.EnableAutomaticOpinions();
+            }
+            host.Campaigns.Campaigns.Add(campaign.EvaluationMonth, campaign);
+        }
+        var first = await client.GetFromJsonAsync<JsonElement>("/api/opinions/campaigns?pageSize=2");
+        Assert.AreEqual(4, first.GetProperty("total").GetInt32());
+        Assert.AreEqual(1, first.GetProperty("pageNumber").GetInt32());
+        Assert.AreEqual(2, first.GetProperty("pageSize").GetInt32());
+        var items = first.GetProperty("items");
+        Assert.AreEqual(2, items.GetArrayLength());
+        CollectionAssert.AreEquivalent(new[] { "id", "evaluationMonth", "canAcceptOpinions", "isArchived" },
+            items[0].EnumerateObject().Select(p => p.Name).ToArray());
+        Assert.AreEqual("2026-04-01", items[0].GetProperty("evaluationMonth").GetString());
+        Assert.IsTrue(items[0].GetProperty("canAcceptOpinions").GetBoolean());
+        Assert.IsTrue(items[1].GetProperty("isArchived").GetBoolean());
+        Assert.IsFalse(items[1].GetProperty("canAcceptOpinions").GetBoolean());
+        var second = await client.GetFromJsonAsync<JsonElement>("/api/opinions/campaigns?pageNumber=2&pageSize=2");
+        Assert.AreEqual("2026-02-01", second.GetProperty("items")[0].GetProperty("evaluationMonth").GetString());
+        Assert.IsFalse(second.GetProperty("items")[0].GetProperty("canAcceptOpinions").GetBoolean());
+        Assert.IsTrue(second.GetProperty("items")[1].GetProperty("canAcceptOpinions").GetBoolean());
+        Assert.AreEqual(HttpStatusCode.Forbidden, (await client.GetAsync("/api/campaigns")).StatusCode);
+    }
+
+    [TestMethod]
+    public async Task OpinionCampaigns_AnonymousSponsorAndAdministratorAreDenied()
+    {
+        using var host = new Host(); using var client = host.Client();
+        Assert.AreEqual(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/opinions/campaigns")).StatusCode);
+        Bearer(client, (await Login(client, await host.Sponsor())).AccessToken);
+        Assert.AreEqual(HttpStatusCode.Forbidden, (await client.GetAsync("/api/opinions/campaigns")).StatusCode);
+        Bearer(client, (await Login(client, await host.Account(false))).AccessToken);
+        Assert.AreEqual(HttpStatusCode.Forbidden, (await client.GetAsync("/api/opinions/campaigns")).StatusCode);
+    }
+
+    [TestMethod]
+    public async Task OpinionCampaigns_EnforcesCurrentAccountAndPasswordState()
+    {
+        using var host = new Host(); using var client = host.Client();
+        var account = await host.Account(true, AccountRoles.Safety);
+        Bearer(client, (await Login(client, account)).AccessToken);
+        Assert.AreEqual(HttpStatusCode.Forbidden, (await client.GetAsync("/api/opinions/campaigns")).StatusCode);
+        host.Store.Users[account.Account.Id].MustChangePassword = false;
+        Assert.AreEqual(HttpStatusCode.OK, (await client.GetAsync("/api/opinions/campaigns")).StatusCode);
+        host.Store.Memberships[account.Account.Id].Clear();
+        Assert.AreEqual(HttpStatusCode.Forbidden, (await client.GetAsync("/api/opinions/campaigns")).StatusCode);
+        host.Store.Users[account.Account.Id].IsActive = false;
+        Assert.AreEqual(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/opinions/campaigns")).StatusCode);
+    }
+
+    [TestMethod]
+    [DataRow(0, 20)]
+    [DataRow(1, 0)]
+    [DataRow(1, 101)]
+    [DataRow(int.MaxValue, 100)]
+    public async Task OpinionCampaigns_InvalidPaginationReturns400(int pageNumber, int pageSize)
+    {
+        using var host = new Host(); using var client = host.Client();
+        Bearer(client, (await Login(client, await host.Account(false, AccountRoles.Quality))).AccessToken);
+        Assert.AreEqual(HttpStatusCode.BadRequest,
+            (await client.GetAsync($"/api/opinions/campaigns?pageNumber={pageNumber}&pageSize={pageSize}")).StatusCode);
+    }
+
+    [TestMethod]
+    public async Task OpinionCampaigns_EmptyResponseIsSuccessful()
+    {
+        using var host = new Host(); using var client = host.Client();
+        Bearer(client, (await Login(client, await host.Account(false, AccountRoles.HumanResources))).AccessToken);
+        var response = await client.GetFromJsonAsync<JsonElement>("/api/opinions/campaigns");
+        Assert.AreEqual(0, response.GetProperty("total").GetInt32());
+        Assert.AreEqual(0, response.GetProperty("items").GetArrayLength());
+    }
+
     [TestMethod]
     public async Task SponsorNominationHttp_CreatesUsingTrustedIdentity_AndReturns201()
     {

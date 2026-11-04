@@ -27,6 +27,8 @@ public enum CampaignChange
 }
 
 public sealed record CampaignPage(IReadOnlyList<CampaignDto> Items, int Total, int PageNumber, int PageSize);
+public sealed record OpinionCampaignDto(Guid Id, DateOnly EvaluationMonth, bool CanAcceptOpinions, bool IsArchived);
+public sealed record OpinionCampaignPage(IReadOnlyList<OpinionCampaignDto> Items, int Total, int PageNumber, int PageSize);
 public enum CampaignError { Validation, NotFound, Duplicate, Concurrency, Persistence }
 public sealed record CampaignResult<T>(T? Value, CampaignError? Error = null, string? Message = null)
 {

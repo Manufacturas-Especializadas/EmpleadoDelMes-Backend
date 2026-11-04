@@ -7,6 +7,17 @@ public sealed class CampaignService(ICampaignRepository repository, TimeProvider
 {
     public const int MaximumPageSize = 100;
 
+    public async Task<CampaignResult<OpinionCampaignPage>> ListForOpinionsAsync(int pageNumber = 1, int pageSize = 20,
+        CancellationToken cancellationToken = default)
+    {
+        // Reuse pagination, persistence errors and the domain's effective-state calculation.
+        var result = await ListAsync(pageNumber, pageSize, cancellationToken);
+        if (!result.IsSuccess) return new(null, result.Error, result.Message);
+        var page = result.Value!;
+        return new(new(page.Items.Select(c => new OpinionCampaignDto(c.Id, c.EvaluationMonth,
+            c.CanAcceptOpinions, c.IsArchived)).ToArray(), page.Total, page.PageNumber, page.PageSize));
+    }
+
     public Task<CampaignResult<CampaignDto>> ChangeAsync(Guid id, string? version, CampaignChange change,
         DateTimeOffset? openingAt = null, DateTimeOffset? closingAt = null, CancellationToken cancellationToken = default)
     {
