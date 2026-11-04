@@ -101,6 +101,46 @@ public sealed class AuthHttpTests
     }
     private static void Bearer(HttpClient client, string token) => client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
+    [TestMethod]
+    public async Task ManualCampaignHttp_CreatedLocationDuplicateValidationAndPersistence()
+    {
+        using var host = new Host(); using var client = host.Client();
+        Bearer(client, (await Login(client, await host.Account(false))).AccessToken);
+        var body = new { evaluationMonth = "2020-10-01" };
+        var response = await client.PostAsJsonAsync("/api/campaigns", body);
+        Assert.AreEqual(HttpStatusCode.Created, response.StatusCode, await response.Content.ReadAsStringAsync());
+        var created = (await response.Content.ReadFromJsonAsync<CampaignDto>())!;
+        Assert.IsNotNull(response.Headers.Location);
+        Assert.IsTrue(response.Headers.Location.ToString().EndsWith($"/api/campaigns/{created.Id}"));
+        Assert.AreEqual(HttpStatusCode.OK, (await client.GetAsync(response.Headers.Location)).StatusCode);
+        Assert.AreEqual(HttpStatusCode.Conflict, (await client.PostAsJsonAsync("/api/campaigns", body)).StatusCode);
+        foreach (var invalid in new[] { "{}", "{\"evaluationMonth\":null}", "{\"evaluationMonth\":\"bad\"}",
+            "{\"evaluationMonth\":\"2020-10-02\"}", "{\"evaluationMonth\":\"9999-01-01\"}" })
+            Assert.AreEqual(HttpStatusCode.BadRequest, (await client.PostAsync("/api/campaigns",
+                new StringContent(invalid, System.Text.Encoding.UTF8, "application/json"))).StatusCode);
+        host.Campaigns.Failure = CampaignError.Persistence;
+        var failure = await client.PostAsJsonAsync("/api/campaigns", new { evaluationMonth = "2020-09-01" });
+        Assert.AreEqual(HttpStatusCode.ServiceUnavailable, failure.StatusCode);
+        Assert.IsFalse((await failure.Content.ReadAsStringAsync()).Contains("Internal"));
+        Assert.AreEqual(1, host.Campaigns.Campaigns.Count);
+    }
+
+    [TestMethod]
+    [DataRow(AccountRoles.HumanResources)]
+    [DataRow(AccountRoles.Safety)]
+    [DataRow(AccountRoles.Quality)]
+    [DataRow(AccountRoles.Sponsor)]
+    public async Task ManualCampaignHttp_RequiresAdministrator(string role)
+    {
+        using var host = new Host(); using var client = host.Client();
+        var body = new { evaluationMonth = "2020-10-01" };
+        Assert.AreEqual(HttpStatusCode.Unauthorized, (await client.PostAsJsonAsync("/api/campaigns", body)).StatusCode);
+        var account = role == AccountRoles.Sponsor ? await host.Sponsor() : await host.Account(false, role);
+        Bearer(client, (await Login(client, account)).AccessToken);
+        Assert.AreEqual(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync("/api/campaigns", body)).StatusCode);
+        Assert.AreEqual(0, host.Campaigns.Campaigns.Count);
+    }
+
     private sealed class OpinionCampaignClock : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => new(2026, 11, 4, 12, 0, 0, TimeSpan.Zero);

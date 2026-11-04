@@ -46,13 +46,29 @@ public sealed class CampaignRepository(ApplicationDbContext context, TimeProvide
         var entry = context.Campaigns.Add(campaign);
         try
         {
+            await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+            if (!await CampaignAdministrationLock.AcquireAsync(context, cancellationToken))
+                throw new CampaignPersistenceException(CampaignError.Concurrency);
+            if (await context.Campaigns.AsNoTracking().AnyAsync(c => c.EvaluationMonth == campaign.EvaluationMonth, cancellationToken))
+                throw new CampaignPersistenceException(CampaignError.Duplicate);
+            var others = await context.Campaigns.AsNoTracking()
+                .Where(c => !c.IsArchived && c.NominationPeriod.Mode != Domain.Enums.CampaignPeriodMode.ManuallyClosed)
+                .ToArrayAsync(cancellationToken);
+            var now = clock.GetUtcNow();
+            if (others.Any(other => CampaignNominationPolicy.Conflicts(campaign, other, now)))
+                throw new CampaignPersistenceException(CampaignError.Concurrency);
             await context.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
             return CampaignDto.FromDomain(campaign, Convert.ToBase64String(entry.Property<byte[]>("RowVersion").CurrentValue!), clock.GetUtcNow());
         }
         catch (DbUpdateException ex) when (ex.InnerException is SqlException { Number: 2601 or 2627 })
         {
             throw new CampaignPersistenceException(CampaignError.Duplicate, ex);
         }
+        catch (SqlException ex) when (ex.Number is 1205 or 1222)
+        { throw new CampaignPersistenceException(CampaignError.Concurrency, ex); }
+        catch (DbUpdateException ex) when (ex.InnerException is SqlException { Number: 1205 or 1222 })
+        { throw new CampaignPersistenceException(CampaignError.Concurrency, ex); }
         catch (DbUpdateException ex) { throw new CampaignPersistenceException(CampaignError.Persistence, ex); }
         catch (SqlException ex) { throw new CampaignPersistenceException(CampaignError.Persistence, ex); }
         finally

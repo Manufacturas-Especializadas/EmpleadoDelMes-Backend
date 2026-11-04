@@ -13,6 +13,18 @@ namespace EmpleadoDelMes.Api.Controllers;
 [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
 public sealed class CampaignsController(CampaignService service) : ControllerBase
 {
+    [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+    public sealed record CreateRequest(DateOnly? EvaluationMonth);
+
+    [HttpPost]
+    public async Task<IActionResult> Create(CreateRequest request, CancellationToken token)
+    {
+        var result = await service.CreateManualAsync(request.EvaluationMonth, token);
+        return result.IsSuccess
+            ? CreatedAtAction(nameof(GetById), new { id = result.Value!.Id }, result.Value)
+            : Respond(result);
+    }
+
     public sealed record VersionRequest(string? Version);
     public sealed record ScheduleRequest(string? Version,
         [property: JsonConverter(typeof(ExplicitOffsetDateTimeConverter))] DateTimeOffset? OpeningAt,

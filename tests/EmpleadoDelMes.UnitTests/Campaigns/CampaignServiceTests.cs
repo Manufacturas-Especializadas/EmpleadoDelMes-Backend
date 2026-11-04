@@ -52,6 +52,8 @@ internal sealed class CampaignTestRepository : ICampaignRepository
             CreateCalls++;
             if (Failure is { } error && (FailOnMonth is null || FailOnMonth == campaign.EvaluationMonth))
                 throw new CampaignPersistenceException(error, new Exception("Internal database detail"));
+            if (!Campaigns.ContainsKey(campaign.EvaluationMonth) && Campaigns.Values.Any(other => CampaignNominationPolicy.Conflicts(campaign, other, Clock.GetUtcNow())))
+                throw new CampaignPersistenceException(CampaignError.Concurrency);
             if (!Campaigns.TryAdd(campaign.EvaluationMonth, campaign))
             {
                 DuplicateWrites++;
@@ -106,6 +108,71 @@ public sealed class CampaignServiceTests
     private static readonly DateTimeOffset Now = new(2026, 11, 1, 1, 0, 0, TimeSpan.Zero);
     private sealed class Clock : TimeProvider { public override DateTimeOffset GetUtcNow() => Now; }
     private static CampaignService Service(CampaignTestRepository repository) => new(repository, new Clock());
+
+    [TestMethod]
+    public async Task ManualCreation_UsesPlantCalendarAndClosedDomainDefaults()
+    {
+        var repository = new CampaignTestRepository(); var service = Service(repository);
+        // UTC is November 1, but Monterrey is still October 31.
+        Assert.AreEqual(CampaignError.Validation, (await service.CreateManualAsync(new(2026, 10, 1))).Error);
+        Assert.AreEqual(CampaignError.Validation, (await service.CreateManualAsync(new(2026, 11, 1))).Error);
+        Assert.AreEqual(CampaignError.Validation, (await service.CreateManualAsync(new(2027, 1, 1))).Error);
+        Assert.AreEqual(CampaignError.Validation, (await service.CreateManualAsync(new(2026, 9, 2))).Error);
+        Assert.AreEqual(CampaignError.Validation, (await service.CreateManualAsync(null)).Error);
+        var created = (await service.CreateManualAsync(new(2026, 9, 1))).Value!;
+        Assert.AreEqual(Now, created.CreatedAtUtc);
+        Assert.AreEqual(new DateOnly(2026, 9, 1), created.EvaluationMonth);
+        Assert.IsFalse(created.IsArchived);
+        foreach (var period in new[] { created.NominationPeriod, created.OpinionPeriod })
+        {
+            Assert.AreEqual(CampaignPeriodMode.ManuallyClosed, period.Mode);
+            Assert.IsNull(period.ScheduledOpeningAtUtc);
+            Assert.IsNull(period.ScheduledClosingAtUtc);
+        }
+        repository.Campaigns[created.EvaluationMonth].OpenOpinions();
+        var before = repository.ToDto(repository.Campaigns[created.EvaluationMonth]);
+        var duplicate = await service.CreateManualAsync(created.EvaluationMonth);
+        Assert.AreEqual(CampaignError.Duplicate, duplicate.Error);
+        Assert.AreEqual(before, repository.ToDto(repository.Campaigns[created.EvaluationMonth]));
+        Assert.AreEqual(1, repository.CreateCalls);
+    }
+
+    [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task ManualAndAutomaticCreation_ShareUniqueMonthProtection(bool manualStartsFirst)
+    {
+        var repository = new CampaignTestRepository { CoordinateTwoReads = true };
+        var service = Service(repository);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        Task<CampaignResult<CampaignDto>> manual, automatic;
+        if (manualStartsFirst)
+        {
+            manual = service.CreateManualAsync(new(2026, 9, 1), timeout.Token);
+            automatic = service.EnsurePreviousMonthAsync(new(2026, 10, 3), timeout.Token);
+        }
+        else
+        {
+            automatic = service.EnsurePreviousMonthAsync(new(2026, 10, 3), timeout.Token);
+            manual = service.CreateManualAsync(new(2026, 9, 1), timeout.Token);
+        }
+        await Task.WhenAll(manual, automatic);
+        Assert.IsTrue(automatic.Result.IsSuccess);
+        Assert.IsTrue(manual.Result.IsSuccess || manual.Result.Error == CampaignError.Duplicate);
+        Assert.AreEqual(1, repository.Campaigns.Count);
+        Assert.AreEqual(1, repository.DuplicateWrites);
+        Assert.AreEqual(repository.Campaigns.Values.Single().Id, automatic.Result.Value!.Id);
+    }
+
+    [TestMethod]
+    public async Task ManualCreation_PersistenceFailureIsControlled()
+    {
+        var repository = new CampaignTestRepository { Failure = CampaignError.Persistence };
+        var result = await Service(repository).CreateManualAsync(new(2026, 9, 1));
+        Assert.AreEqual(CampaignError.Persistence, result.Error);
+        Assert.IsFalse(result.Message!.Contains("Internal"));
+        Assert.AreEqual(0, repository.Campaigns.Count);
+    }
 
     [TestMethod]
     [DataRow(2026, 11, 3, 2026, 10)]
