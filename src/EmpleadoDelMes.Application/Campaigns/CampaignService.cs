@@ -64,26 +64,59 @@ public sealed class CampaignService(ICampaignRepository repository, TimeProvider
 
     // The caller supplies the plant's local date. UTC is used only for creation timestamps.
     public Task<CampaignResult<CampaignDto>> EnsurePreviousMonthAsync(DateOnly localReferenceDate,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, CampaignSchedule? schedule = null)
     {
         if (localReferenceDate.Year == 1 && localReferenceDate.Month == 1)
             return Task.FromResult(Invalid<CampaignDto>("La fecha de referencia debe permitir calcular el mes anterior."));
         var month = FirstDay(localReferenceDate).AddMonths(-1);
-        return Execute(async () =>
+        return CreateMonthAsync(month, true, cancellationToken, schedule);
+    }
+
+    public Task<CampaignResult<CampaignDto>> CreateManualAsync(DateOnly? evaluationMonth,
+        CancellationToken cancellationToken = default)
+    {
+        if (evaluationMonth is null || evaluationMonth.Value.Day != 1)
+            return Task.FromResult(Invalid<CampaignDto>("Indica el primer día del mes evaluado."));
+        // Explicit plant calendar; never use the server's local zone or a fixed UTC offset.
+        var zone = TimeZoneInfo.FindSystemTimeZoneById("America/Monterrey");
+        var localDate = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(clock.GetUtcNow(), zone).DateTime);
+        if (evaluationMonth.Value >= FirstDay(localDate))
+            return Task.FromResult(Invalid<CampaignDto>("Solo puedes crear convocatorias de meses completos anteriores al mes actual de la planta."));
+        return CreateMonthAsync(evaluationMonth.Value, false, cancellationToken);
+    }
+
+    private Task<CampaignResult<CampaignDto>> CreateMonthAsync(DateOnly month, bool returnExisting,
+        CancellationToken cancellationToken, CampaignSchedule? schedule = null) => Execute(async () =>
         {
             var existing = await repository.GetByMonthAsync(month, cancellationToken);
-            if (existing is not null) return new CampaignResult<CampaignDto>(existing);
+            if (existing is not null) return returnExisting ? new CampaignResult<CampaignDto>(existing) : DuplicateMonth();
             var campaign = new Campaign(Guid.NewGuid(), month, clock.GetUtcNow());
+            if (schedule is not null)
+            {
+                try
+                {
+                    var dates = schedule.Calculate(month);
+                    campaign.ScheduleNominations(dates.NominationOpening, dates.NominationClosing);
+                    campaign.ScheduleOpinions(dates.OpinionOpening, dates.OpinionClosing);
+                    campaign.EnableAutomaticNominations();
+                    campaign.EnableAutomaticOpinions();
+                }
+                catch (ArgumentException)
+                { return Invalid<CampaignDto>("La programación automática contiene fechas u horas locales inválidas. Revisa su configuración."); }
+            }
             try { return new(await repository.CreateAsync(campaign, cancellationToken)); }
             catch (CampaignPersistenceException ex) when (ex.Error == CampaignError.Duplicate)
             {
+                if (!returnExisting) return DuplicateMonth();
                 // Another instance won the unique-index race. Read its record without updating it.
                 existing = await repository.GetByMonthAsync(month, cancellationToken);
                 return existing is not null ? new(existing) : new(null, CampaignError.Concurrency,
                     "La información cambió durante la operación. Inténtalo nuevamente.");
             }
         });
-    }
+
+    private static CampaignResult<CampaignDto> DuplicateMonth() =>
+        new(null, CampaignError.Duplicate, "Ya existe una convocatoria para ese mes evaluado.");
 
     public Task<CampaignResult<CampaignDto>> GetByIdAsync(Guid id, CancellationToken cancellationToken = default) =>
         id == Guid.Empty ? Task.FromResult(Invalid<CampaignDto>("Selecciona una convocatoria válida."))

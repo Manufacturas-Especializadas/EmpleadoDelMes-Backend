@@ -29,7 +29,7 @@ public sealed class CampaignAutomationCycle(CampaignAutomationSettings settings,
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 // Supply the following local month to reuse the previous-month use case unchanged.
-                var result = await campaigns.EnsurePreviousMonthAsync(month.AddMonths(1), cancellationToken);
+                var result = await campaigns.EnsurePreviousMonthAsync(month.AddMonths(1), cancellationToken, settings.Schedule);
                 if (!result.IsSuccess)
                 {
                     logger.LogWarning("No se completó la generación mensual de convocatorias. Se reintentará en la próxima comprobación. Mes pendiente: {EvaluationMonth}", month);

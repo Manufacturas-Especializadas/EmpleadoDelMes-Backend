@@ -13,6 +13,101 @@ namespace EmpleadoDelMes.UnitTests.Campaigns;
 [TestClass]
 public sealed class CampaignAutomationTests
 {
+    private static IConfiguration ScheduledConfig(string? key = null, string? value = null)
+    {
+        var values = new Dictionary<string, string?>
+        {
+            ["CampaignAutomation:Schedule:Enabled"] = "true",
+            ["CampaignAutomation:Schedule:NominationOpeningDayOffset"] = "0",
+            ["CampaignAutomation:Schedule:NominationOpeningLocalTime"] = "08:00",
+            ["CampaignAutomation:Schedule:NominationClosingDayOffset"] = "9",
+            ["CampaignAutomation:Schedule:NominationClosingLocalTime"] = "18:00",
+            ["CampaignAutomation:Schedule:OpinionOpeningDayOffset"] = "10",
+            ["CampaignAutomation:Schedule:OpinionOpeningLocalTime"] = "08:00",
+            ["CampaignAutomation:Schedule:OpinionClosingDayOffset"] = "19",
+            ["CampaignAutomation:Schedule:OpinionClosingLocalTime"] = "18:00"
+        };
+        if (key is not null) values["CampaignAutomation:Schedule:" + key] = value;
+        return new ConfigurationBuilder().AddConfiguration(Config()).AddInMemoryCollection(values).Build();
+    }
+
+    [TestMethod]
+    [DataRow("Enabled", "invalid")]
+    [DataRow("NominationOpeningDayOffset", null)]
+    [DataRow("OpinionClosingLocalTime", "24:00")]
+    [DataRow("NominationOpeningDayOffset", "-1")]
+    [DataRow("OpinionClosingDayOffset", "366")]
+    [DataRow("NominationClosingDayOffset", "31")]
+    [DataRow("OpinionClosingDayOffset", "0")]
+    public void Schedule_InvalidConfigurationFailsBeforePersistence(string key, string? value) =>
+        Assert.Throws<InvalidOperationException>(() => CampaignAutomationSettings.Read(ScheduledConfig(key, value)));
+
+    [TestMethod]
+    public void Schedule_DisabledNeedsNoDates() =>
+        Assert.IsNull(CampaignAutomationSettings.Read(ScheduledConfig("Enabled", "false")).Schedule);
+
+    [TestMethod]
+    public async Task InvalidSchedule_StopsWorkerBeforeAnyRepositoryAccess()
+    {
+        var clock = new Clock(new(2026, 11, 3, 18, 0, 0, TimeSpan.Zero));
+        var store = new CampaignTestRepository();
+        using var provider = Provider(store, clock);
+        using var worker = new CampaignAutomationWorker(ScheduledConfig("OpinionOpeningLocalTime", null),
+            provider.GetRequiredService<IServiceScopeFactory>(), clock, new Log());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => worker.StartAsync(CancellationToken.None));
+        Assert.AreEqual(0, store.MonthReads);
+        Assert.AreEqual(0, store.CreateCalls);
+    }
+
+    [TestMethod]
+    [DataRow(2026, 2, 7, 2, 30)] // March 8, nonexistent local time.
+    [DataRow(2026, 10, 0, 1, 30)] // November 1, ambiguous local time.
+    public void Schedule_RejectsInvalidAndAmbiguousLocalTimes(int year, int month, int day, int hour, int minute)
+    {
+        var point = new CampaignSchedulePoint(day, new(hour, minute));
+        Assert.Throws<ArgumentException>(() => point.ToUtc(new(year, month, 1), TimeZoneInfo.FindSystemTimeZoneById("America/New_York")));
+    }
+
+    [TestMethod]
+    public async Task ScheduledRecovery_ConvertsUtc_PreservesManualChanges_AndRetriesConflicts()
+    {
+        var clock = new Clock(new(2027, 1, 5, 18, 0, 0, TimeSpan.Zero));
+        var store = new CampaignTestRepository { Clock = clock };
+        using var provider = Provider(store, clock);
+        var blocker = new Campaign(Guid.NewGuid(), new(2026, 8, 1), clock.GetUtcNow());
+        blocker.OpenNominations(); store.Campaigns.Add(blocker.EvaluationMonth, blocker);
+        var cycle = Cycle(provider, clock, ScheduledConfig());
+        await cycle.CheckAsync(CancellationToken.None);
+        // Past recovered windows may be inserted, but the current automatic window conflicts with manual opening.
+        Assert.IsFalse(store.Campaigns.ContainsKey(new(2026, 12, 1)));
+        blocker.CloseNominations();
+        await cycle.CheckAsync(CancellationToken.None);
+        var december = store.Campaigns[new(2026, 12, 1)];
+        Assert.AreEqual(new DateTimeOffset(2027, 1, 1, 14, 0, 0, TimeSpan.Zero), december.NominationPeriod.ScheduledOpeningAtUtc);
+        Assert.AreEqual(new DateTimeOffset(2027, 1, 21, 0, 0, 0, TimeSpan.Zero), december.OpinionPeriod.ScheduledClosingAtUtc);
+        Assert.AreEqual(CampaignPeriodMode.Automatic, december.NominationPeriod.Mode);
+        Assert.AreEqual(CampaignPeriodMode.Automatic, december.OpinionPeriod.Mode);
+        december.CloseOpinions(); december.ScheduleNominations(clock.GetUtcNow(), clock.GetUtcNow().AddHours(1));
+        december.Archive();
+        var before = store.ToDto(december);
+        await Cycle(provider, clock, ScheduledConfig()).CheckAsync(CancellationToken.None);
+        Assert.AreEqual(before, store.ToDto(december));
+        Assert.AreEqual(4, store.Campaigns.Count);
+    }
+
+    [TestMethod]
+    public async Task ScheduledTwoInstances_DoNotDuplicateOrOverwrite()
+    {
+        var clock = new Clock(new(2026, 11, 3, 18, 0, 0, TimeSpan.Zero));
+        var store = new CampaignTestRepository { CoordinateTwoReads = true, Clock = clock };
+        using var provider = Provider(store, clock);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var config = ScheduledConfig();
+        await Task.WhenAll(Cycle(provider, clock, config).CheckAsync(timeout.Token), Cycle(provider, clock, config).CheckAsync(timeout.Token));
+        Assert.AreEqual(1, store.Campaigns.Count);
+        Assert.AreEqual(1, store.DuplicateWrites);
+        Assert.AreEqual(CampaignPeriodMode.Automatic, store.Campaigns.Values.Single().OpinionPeriod.Mode);
+    }
     // Timer callbacks are delivered only when the test advances the clock; no hour-long waits.
     private sealed class Clock(DateTimeOffset now) : TimeProvider
     {
@@ -236,11 +331,13 @@ public sealed class CampaignAutomationTests
     }
 
     [TestMethod]
-    public async Task Worker_ImmediateCheck_TimerRetry_AndCancellation_UseControlledTime()
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task Worker_ImmediateCheck_TimerRetry_AndCancellation_UseControlledTime(bool scheduled)
     {
         var clock = new Clock(new(2026, 11, 3, 18, 0, 0, TimeSpan.Zero)); var store = new CampaignTestRepository { Failure = CampaignError.Persistence };
         using var provider = Provider(store, clock); var log = new Log();
-        using var worker = new CampaignAutomationWorker(Config(), provider.GetRequiredService<IServiceScopeFactory>(), clock, log);
+        using var worker = new CampaignAutomationWorker(scheduled ? ScheduledConfig() : Config(), provider.GetRequiredService<IServiceScopeFactory>(), clock, log);
         await worker.StartAsync(CancellationToken.None);
         await log.Next(); Assert.AreEqual(0, store.Campaigns.Count);
         await clock.TimerCreated.Task.WaitAsync(TimeSpan.FromSeconds(10));
