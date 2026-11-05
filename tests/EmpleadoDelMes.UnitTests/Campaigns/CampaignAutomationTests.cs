@@ -95,7 +95,7 @@ public sealed class CampaignAutomationTests
         var before = store.ToDto(december);
         await Cycle(provider, clock, Config()).CheckAsync(CancellationToken.None);
         Assert.AreEqual(before, store.ToDto(december));
-        Assert.AreEqual(4, store.Campaigns.Count);
+        Assert.AreEqual(5, store.Campaigns.Count);
     }
 
     [TestMethod]
@@ -107,9 +107,9 @@ public sealed class CampaignAutomationTests
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         var config = Config();
         await Task.WhenAll(Cycle(provider, clock, config).CheckAsync(timeout.Token), Cycle(provider, clock, config).CheckAsync(timeout.Token));
-        Assert.AreEqual(1, store.Campaigns.Count);
+        Assert.AreEqual(2, store.Campaigns.Count);
         Assert.AreEqual(0, store.DuplicateWrites);
-        Assert.AreEqual(CampaignPeriodMode.Automatic, store.Campaigns.Values.Single().OpinionPeriod.Mode);
+        Assert.IsTrue(store.Campaigns.Values.All(c => c.OpinionPeriod.Mode == CampaignPeriodMode.Automatic));
     }
     // Timer callbacks are delivered only when the test advances the clock; no hour-long waits.
     private sealed class Clock(DateTimeOffset now) : TimeProvider
@@ -260,9 +260,9 @@ public sealed class CampaignAutomationTests
         Assert.Throws<InvalidOperationException>(() => CampaignAutomationSettings.Read(Config(enabled, zone, first, interval)));
 
     [TestMethod]
-    [DataRow(2026, 11, 2026, 10)]
-    [DataRow(2027, 1, 2026, 12)]
-    public async Task LocalMonth_CreatesPreviousMonthWithSqlSchedule(int year, int month, int expectedYear, int expectedMonth)
+    [DataRow(2026, 11, 2026, 11)]
+    [DataRow(2027, 1, 2027, 1)]
+    public async Task LocalMonth_CreatesCurrentMonthWithSqlSchedule(int year, int month, int expectedYear, int expectedMonth)
     {
         var clock = new Clock(new(year, month, 1, 18, 0, 0, TimeSpan.Zero)); var store = new CampaignTestRepository();
         using var provider = Provider(store, clock);
@@ -282,11 +282,11 @@ public sealed class CampaignAutomationTests
         var clock = new Clock(new(2026, 11, 1, 0, 30, 0, TimeSpan.Zero)); var store = new CampaignTestRepository();
         using var provider = Provider(store, clock); var cycle = Cycle(provider, clock, Config(first: "2026-09-01"));
         await cycle.CheckAsync(CancellationToken.None);
-        Assert.IsTrue(store.Campaigns.ContainsKey(new(2026, 9, 1))); Assert.AreEqual(1, store.Campaigns.Count);
+        Assert.IsTrue(store.Campaigns.ContainsKey(new(2026, 9, 1))); Assert.AreEqual(2, store.Campaigns.Count);
         var reads = store.MonthReads;
         await cycle.CheckAsync(CancellationToken.None); Assert.IsTrue(store.MonthReads > reads);
         clock.Advance(TimeSpan.FromHours(6)); await cycle.CheckAsync(CancellationToken.None);
-        Assert.IsTrue(store.Campaigns.ContainsKey(new(2026, 10, 1))); Assert.AreEqual(2, store.Campaigns.Count);
+        Assert.IsTrue(store.Campaigns.ContainsKey(new(2026, 11, 1))); Assert.AreEqual(3, store.Campaigns.Count);
     }
 
     [TestMethod]
@@ -300,11 +300,11 @@ public sealed class CampaignAutomationTests
         using var provider = Provider(store, clock); var before = store.ToDto(existing);
         var cycle = Cycle(provider, clock);
         await cycle.CheckAsync(CancellationToken.None); await cycle.CheckAsync(CancellationToken.None);
-        CollectionAssert.AreEqual(new[] { new DateOnly(2026, 10, 1), new(2026, 11, 1), new(2026, 12, 1), new(2027, 1, 1) }, store.Campaigns.Keys.Order().ToArray());
-        Assert.AreEqual(before, store.ToDto(existing)); Assert.AreEqual(3, store.CreateCalls);
+        CollectionAssert.AreEqual(new[] { new DateOnly(2026, 10, 1), new(2026, 11, 1), new(2026, 12, 1), new(2027, 1, 1), new(2027, 2, 1) }, store.Campaigns.Keys.Order().ToArray());
+        Assert.AreEqual(before, store.ToDto(existing)); Assert.AreEqual(4, store.CreateCalls);
         var reads = store.MonthReads;
         await Cycle(provider, clock).CheckAsync(CancellationToken.None); // New instance has no in-memory completion mark.
-        Assert.IsTrue(store.MonthReads > reads); Assert.AreEqual(3, store.CreateCalls);
+        Assert.IsTrue(store.MonthReads > reads); Assert.AreEqual(4, store.CreateCalls);
     }
 
     [TestMethod]
@@ -315,7 +315,7 @@ public sealed class CampaignAutomationTests
         using var provider = Provider(store, clock); var log = new Log(); var cycle = Cycle(provider, clock, log: log);
         await cycle.CheckAsync(CancellationToken.None); Assert.AreEqual(1, store.Campaigns.Count);
         store.Failure = null; await cycle.CheckAsync(CancellationToken.None);
-        Assert.AreEqual(3, store.Campaigns.Count); Assert.AreEqual(0, store.DuplicateWrites);
+        Assert.AreEqual(4, store.Campaigns.Count); Assert.AreEqual(0, store.DuplicateWrites);
         Assert.IsFalse(string.Join(' ', log.Messages).Contains("Internal database detail"));
     }
 
@@ -325,7 +325,7 @@ public sealed class CampaignAutomationTests
         var clock = new Clock(new(2026, 11, 3, 18, 0, 0, TimeSpan.Zero)); var store = new CampaignTestRepository();
         using var provider = Provider(store, clock); using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         await Task.WhenAll(Cycle(provider, clock).CheckAsync(timeout.Token), Cycle(provider, clock).CheckAsync(timeout.Token));
-        Assert.AreEqual(1, store.Campaigns.Count); Assert.AreEqual(0, store.DuplicateWrites);
+        Assert.AreEqual(2, store.Campaigns.Count); Assert.AreEqual(0, store.DuplicateWrites);
     }
 
     [TestMethod]
@@ -334,7 +334,7 @@ public sealed class CampaignAutomationTests
         var services = new ServiceCollection(); services.AddSingleton<CampaignAutomationStatus>();
         using var provider = services.BuildServiceProvider();
         var clock = new Clock(new(2026, 11, 3, 18, 0, 0, TimeSpan.Zero));
-        await Cycle(provider, clock, Config(first: "2026-11-01")).CheckAsync(CancellationToken.None);
+        await Cycle(provider, clock, Config(first: "2026-12-01")).CheckAsync(CancellationToken.None);
     }
 
     [TestMethod]
@@ -347,7 +347,7 @@ public sealed class CampaignAutomationTests
         await log.Next(); Assert.AreEqual(0, store.Campaigns.Count);
         await clock.TimerCreated.Task.WaitAsync(TimeSpan.FromSeconds(10));
         store.Failure = null; clock.Advance(TimeSpan.FromMinutes(60));
-        await log.Next(); Assert.AreEqual(1, store.Campaigns.Count);
+        await log.Next(); Assert.AreEqual(2, store.Campaigns.Count);
         using var stopTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         await worker.StopAsync(stopTimeout.Token);
         await worker.ExecuteTask!.WaitAsync(stopTimeout.Token);

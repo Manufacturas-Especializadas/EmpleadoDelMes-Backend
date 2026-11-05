@@ -74,19 +74,19 @@ public sealed class PersistentAutomationTests
         var before = f.Campaigns.ToDto(f.Campaigns.Campaigns[new(2026, 10, 1)]);
         var lastGenerated = f.Status.Read().LastGenerationAtUtc;
         await f.Save(false); await cycle.CheckAsync(default);
-        Assert.AreEqual(1, f.Campaigns.CreateCalls);
+        Assert.AreEqual(2, f.Campaigns.CreateCalls);
         var changed = AutomationTestStore.Calendar with { OpinionClosingDayOffset = 20 };
         await f.Save(true, changed); await cycle.CheckAsync(default);
         Assert.AreEqual(before, f.Campaigns.ToDto(f.Campaigns.Campaigns[new(2026, 10, 1)]));
         Assert.AreEqual(lastGenerated, f.Status.Read().LastGenerationAtUtc);
         f.Clock.Now = f.Clock.Now.AddMonths(1);
         await cycle.CheckAsync(default);
-        var next = f.Campaigns.Campaigns[new(2026, 11, 1)];
-        Assert.AreEqual(new DateTimeOffset(2026, 12, 22, 0, 0, 0, TimeSpan.Zero), next.OpinionPeriod.ScheduledClosingAtUtc);
+        var next = f.Campaigns.Campaigns[new(2026, 12, 1)];
+        Assert.AreEqual(new DateTimeOffset(2027, 1, 22, 0, 0, 0, TimeSpan.Zero), next.OpinionPeriod.ScheduledClosingAtUtc);
         Assert.AreEqual(3, f.Store.Audit.Count);
         StringAssert.Contains(f.Store.Audit[0].PreviousValues, "\"IsEnabled\":false");
         StringAssert.Contains(f.Store.Audit[0].NewValues, "\"IsEnabled\":true");
-        Assert.AreEqual(new DateOnly(2026, 11, 1), f.Status.Read().LastGeneratedMonth);
+        Assert.AreEqual(new DateOnly(2026, 12, 1), f.Status.Read().LastGeneratedMonth);
     }
 
     [TestMethod]
@@ -107,7 +107,7 @@ public sealed class PersistentAutomationTests
             AutomationTestStore.Calendar with { OpinionClosingLocalTime = "24:00" },
             AutomationTestStore.Calendar with { NominationClosingDayOffset = 31 },
             AutomationTestStore.Calendar with { OpinionClosingDayOffset = 0 },
-            AutomationTestStore.Calendar with { NominationOpeningDayOffset = -1 },
+            AutomationTestStore.Calendar with { NominationOpeningDayOffset = -32 },
             AutomationTestStore.Calendar with { OpinionClosingDayOffset = 366 },
             AutomationTestStore.Calendar with { NominationOpeningLocalTime = "08:00:00" } })
         {
@@ -154,7 +154,7 @@ public sealed class PersistentAutomationTests
         var preview = await f.Service.PreviewAsync(new(AutomationTestStore.Calendar, 3), default);
         Assert.IsTrue(preview.Months.Single(m => m.EvaluationMonth == existing.EvaluationMonth).AlreadyExists);
         Assert.IsTrue(preview.Months.Any(m => m.Conflicts.Count > 0));
-        Assert.AreEqual(0, preview.PendingMonths.Count); Assert.AreEqual(0, f.Store.Audit.Count);
+        Assert.AreEqual(1, preview.PendingMonths.Count); Assert.AreEqual(0, f.Store.Audit.Count);
         Assert.AreEqual(0, f.Campaigns.CreateCalls);
         var error = await Assert.ThrowsAsync<AutomationException>(() => f.Save(true));
         Assert.AreEqual(CampaignError.Concurrency, error.Error);
@@ -173,7 +173,7 @@ public sealed class PersistentAutomationTests
         f.Store.FailRead = true; await cycle.CheckAsync(default);
         Assert.IsNotNull(f.Status.Read().Error); Assert.AreEqual(0, f.Campaigns.CreateCalls);
         f.Store.FailRead = false; await cycle.CheckAsync(default);
-        Assert.IsNull(f.Status.Read().Error); Assert.AreEqual(1, f.Campaigns.CreateCalls);
+        Assert.IsNull(f.Status.Read().Error); Assert.AreEqual(2, f.Campaigns.CreateCalls);
     }
 
     [TestMethod]
@@ -181,7 +181,7 @@ public sealed class PersistentAutomationTests
     {
         using var f = new Fixture(enabled: true);
         await Task.WhenAll(f.Cycle().CheckAsync(default), f.Cycle().CheckAsync(default));
-        Assert.AreEqual(1, f.Campaigns.CreateCalls);
+        Assert.AreEqual(2, f.Campaigns.CreateCalls);
         Assert.AreEqual(0, f.Campaigns.DuplicateWrites);
         var last = f.Status.Read().LastGenerationAtUtc;
         f.Clock.Now = f.Clock.Now.AddHours(1); await f.Cycle().CheckAsync(default);
@@ -203,4 +203,58 @@ public sealed class PersistentAutomationTests
         StringAssert.Contains(db.Database.GenerateCreateScript(), "CK_Automation_Singleton");
         Assert.IsFalse(db.Database.HasPendingModelChanges());
     }
-}
+
+    // Updated expectations for the new business calendar. Added but not executed in this task.
+    [TestMethod]
+    [DataRow(2026, 10, 24)]
+    [DataRow(2026, 11, 23)]
+    [DataRow(2026, 2, 21)]
+    [DataRow(2028, 2, 22)]
+    [DataRow(2026, 12, 24)]
+    public void AnticipatedCalendar_UsesMonthLengthAndPlantTime(int year, int month, int openingDay)
+    {
+        var zone = TimeZoneInfo.FindSystemTimeZoneById("America/Monterrey");
+        var evaluation = new DateOnly(year, month, 1);
+        var schedule = AutomationCalendarValidation.Schedule(AutomationCalendarValidation.Parse(
+            new(-8, "00:00", 7, "00:00", -8, "00:00", 7, "00:00")), zone);
+        var dates = schedule.Calculate(evaluation);
+        Assert.AreEqual(new DateTime(year, month, openingDay), TimeZoneInfo.ConvertTime(dates.NominationOpening, zone).DateTime);
+        Assert.AreEqual(evaluation.AddMonths(1).AddDays(7).ToDateTime(TimeOnly.MinValue),
+            TimeZoneInfo.ConvertTime(dates.NominationClosing, zone).DateTime);
+        Assert.AreEqual(dates.NominationOpening, dates.OpinionOpening);
+        Assert.AreEqual(dates.NominationClosing, dates.OpinionClosing);
+    }
+
+    [TestMethod]
+    public async Task CurrentMonth_IsPending_ButFutureMonthCannotBeGenerated()
+    {
+        using var f = new Fixture(enabled: true);
+        var preview = await f.Service.PreviewAsync(new(new(-8, "00:00", 7, "00:00", -8, "00:00", 7, "00:00"), 3), default);
+        CollectionAssert.AreEqual(new[] { new DateOnly(2026, 10, 1), new DateOnly(2026, 11, 1) }, preview.PendingMonths.ToArray());
+        Assert.IsFalse(preview.Months.Single(m => m.EvaluationMonth == new DateOnly(2026, 12, 1)).IsPending);
+        var error = await Assert.ThrowsAsync<AutomationException>(() => f.Service.GenerateAsync(new(2026, 12, 1), default));
+        Assert.AreEqual(CampaignError.Validation, error.Error);
+        Assert.AreEqual(0, f.Campaigns.CreateCalls);
+    }
+
+    [TestMethod]
+    public async Task ManualOpeningConflict_IsVisible_AndNotClosedByWorker()
+    {
+        using var f = new Fixture(enabled: true);
+        var blocker = new Campaign(Guid.NewGuid(), new(2026, 2, 1), f.Clock.Now);
+        blocker.OpenNominations();
+        f.Campaigns.Campaigns.Add(blocker.EvaluationMonth, blocker);
+        await f.Cycle().CheckAsync(default);
+        StringAssert.Contains(f.Status.Read().Error!, "2026-02");
+        Assert.AreEqual(EmpleadoDelMes.Domain.Enums.CampaignPeriodMode.ManuallyOpen, blocker.NominationPeriod.Mode);
+        Assert.AreEqual(0, f.Campaigns.CreateCalls);
+    }
+
+    [TestMethod]
+    public void SchedulePoint_RejectsOffsetsOutsideRangeAndDateOverflow()
+    {
+        var zone = TimeZoneInfo.FindSystemTimeZoneById("America/Monterrey");
+        Assert.Throws<ArgumentException>(() => new CampaignSchedulePoint(-32, TimeOnly.MinValue).ToUtc(new(2026, 10, 1), zone));
+        Assert.Throws<ArgumentException>(() => new CampaignSchedulePoint(366, TimeOnly.MinValue).ToUtc(new(2026, 10, 1), zone));
+        Assert.Throws<ArgumentException>(() => new CampaignSchedulePoint(-8, TimeOnly.MinValue).ToUtc(new(9999, 12, 1), zone));
+    }}

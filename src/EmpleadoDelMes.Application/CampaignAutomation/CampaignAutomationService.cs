@@ -61,6 +61,8 @@ public sealed class CampaignAutomationService(ICampaignAutomationStore store, IC
         var existing = await store.ReadCampaignsAsync(token);
         var byMonth = existing.ToDictionary(c => c.EvaluationMonth);
         var currentMonth = LocalMonth();
+        if (currentMonth.Year > 9997 || (9997 - currentMonth.Year) * 12 + 12 - currentMonth.Month < upcoming - 1)
+            throw new AutomationException(CampaignError.Validation, "El calendario excede el rango admitido.");
         var last = currentMonth.AddMonths(upcoming - 1);
         // Include far-future manually created records as conflict candidates as well.
         if (existing.Count > 0 && existing.Max(c => c.EvaluationMonth) > last)
@@ -81,7 +83,7 @@ public sealed class CampaignAutomationService(ICampaignAutomationStore store, IC
                         conflicts.Add($"Postulaciones en conflicto con {other.EvaluationMonth:yyyy-MM}.");
             }
             months.Add(new(month, dates, found is not null, found?.Id, found?.IsArchived ?? false,
-                found is null && month < currentMonth, conflicts, found is null ? null : CampaignDto.FromDomain(found, now: clock.GetUtcNow())));
+                found is null && month <= currentMonth, conflicts, found is null ? null : CampaignDto.FromDomain(found, now: clock.GetUtcNow())));
         }
         return new(technical.TimeZone.Id, months, months.Where(m => m.IsPending).Select(m => m.EvaluationMonth).ToArray());
     }
@@ -94,14 +96,21 @@ public sealed class CampaignAutomationService(ICampaignAutomationStore store, IC
             // Re-read under the cross-instance lock: disabling cannot race a later insert.
             var config = await store.ReadAsync(token);
             if (!config.IsEnabled) return new AutomationGeneration(false, false, month);
-            if (month.Day != 1 || month < technical.FirstEvaluationMonth || month >= LocalMonth() || month.Year > 9997)
+            if (month.Day != 1 || month < technical.FirstEvaluationMonth || month > LocalMonth() || month.Year > 9997)
                 throw new AutomationException(CampaignError.Validation, "El mes no corresponde al intervalo de generación.");
             var schedule = AutomationCalendarValidation.Schedule(
                 config.Calendar ?? throw new AutomationException(CampaignError.Validation, "El calendario SQL está incompleto."),
                 technical.TimeZone);
             if (await repository.GetByMonthAsync(month, token) is not null)
                 return new AutomationGeneration(false, true, month);
-            var result = await campaigns.EnsurePreviousMonthAsync(month.AddMonths(1), token, schedule);
+            var candidate = CampaignService.BuildCampaign(month, clock.GetUtcNow(), schedule);
+            var existing = await store.ReadCampaignsAsync(token);
+            var conflicts = existing.Where(other => CampaignNominationPolicy.Conflicts(candidate, other, clock.GetUtcNow()))
+                .Select(other => other.EvaluationMonth.ToString("yyyy-MM", System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+            if (conflicts.Length > 0)
+                throw new AutomationException(CampaignError.Concurrency,
+                    $"No se puede generar {month:yyyy-MM}: sus postulaciones entran en conflicto con {string.Join(", ", conflicts)}. Revisa esas convocatorias; no se cerrarán automáticamente.");
+            var result = await campaigns.EnsureAutomaticMonthAsync(month, schedule, token);
             if (!result.IsSuccess)
                 throw new AutomationException(result.Error!.Value, result.Message ?? "No fue posible generar la convocatoria.");
             // This transaction holds the shared lock since the existence check.

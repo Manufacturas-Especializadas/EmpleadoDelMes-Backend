@@ -72,6 +72,16 @@ public sealed class CampaignService(ICampaignRepository repository, TimeProvider
         return CreateMonthAsync(month, true, cancellationToken, schedule);
     }
 
+    // Automation may prepare the current plant month; manual creation keeps its own restriction.
+    public Task<CampaignResult<CampaignDto>> EnsureAutomaticMonthAsync(DateOnly evaluationMonth,
+        CampaignSchedule schedule, CancellationToken cancellationToken = default)
+    {
+        var zone = TimeZoneInfo.FindSystemTimeZoneById("America/Monterrey");
+        var local = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(clock.GetUtcNow(), zone).DateTime);
+        if (evaluationMonth.Day != 1 || evaluationMonth.Year > 9997 || evaluationMonth > FirstDay(local))
+            return Task.FromResult(Invalid<CampaignDto>("La generación admite meses históricos y el mes actual de Monterrey, hasta el año 9997."));
+        return CreateMonthAsync(evaluationMonth, true, cancellationToken, schedule);
+    }
     public Task<CampaignResult<CampaignDto>> CreateManualAsync(DateOnly? evaluationMonth,
         CancellationToken cancellationToken = default)
     {

@@ -1,5 +1,7 @@
 # Automatización mensual configurable desde Administración
 
+Actualización anticipada: ver [automatizacion-anticipada.md](automatizacion-anticipada.md). Los resultados de tests al final pertenecen a la entrega inicial; no se ejecutaron tests para este cambio.
+
 ## Alcance y arquitectura
 
 Implementación en la rama de trabajo `cambios` del backend. No se modificó el frontend, Azure, autenticación, roles ni bases reales. No se inició la API local contra SQL Server; el host HTTP usado por las pruebas sustituye los repositorios y Identity por dobles en memoria y desactiva bootstrap y worker.
@@ -26,11 +28,11 @@ Infraestructura conserva exclusivamente:
 
 No se modificaron los valores actuales. Estos ajustes técnicos se toman durante el ciclo de vida del proceso; sus cambios requieren reinicio. Los cambios de negocio guardados en SQL se aplican en las comprobaciones siguientes sin reinicio.
 
-Los desplazamientos son días desde el **primer día del mes posterior al mes evaluado**: para octubre de 2026, offset 0 representa 1 de noviembre. Cada hora local debe tener formato HH:mm; offset admitido 0..365. Se convierte mediante America/Monterrey, nunca mediante un offset UTC fijo. Se rechazan apertura >= cierre, horas ambiguas/inexistentes y solapamientos recurrentes de postulaciones. La validación recorre los meses soportados desde el límite técnico hasta 9997, incluyendo cambios de calendario.
+Los desplazamientos son días desde el **primer día del mes posterior al mes evaluado**: para octubre de 2026, offset 0 representa 1 de noviembre. Cada hora local debe tener formato HH:mm; offset admitido -31..365. Se convierte mediante America/Monterrey, nunca mediante un offset UTC fijo. Se rechazan apertura >= cierre, horas ambiguas/inexistentes y solapamientos recurrentes de postulaciones. La validación recorre los meses soportados desde el límite técnico hasta 9997, incluyendo cambios de calendario.
 
 La configuración inicial de la migración tiene IsEnabled=false y Calendar=null. Una actualización requiere calendario completo incluso si se guarda deshabilitada. Al activar se valida también contra convocatorias existentes bajo el bloqueo administrativo; un conflicto impide guardar y devuelve 409. Al pausar no se exige resolver conflictos operativos con aperturas excepcionales existentes. Guardar deshabilitado nunca altera los periodos de convocatorias ya registradas.
 
-El límite técnico determina la recuperación de meses faltantes. No se crean registros del mes local actual ni posteriores hasta que estén completos. Nuevos calendarios se aplican a los meses autorizados que todavía no existen, también al recuperar pendientes; conviene revisar esos pendientes antes de activar.
+El límite técnico determina la recuperación de meses faltantes. Se puede crear el mes local actual desde su primer día; nunca se generan meses posteriores al actual. FirstEvaluationMonth continúa siendo el límite inferior de recuperación. Nuevos calendarios se aplican a los meses autorizados que todavía no existen, también al recuperar pendientes; conviene revisar esos pendientes antes de activar.
 
 ## Endpoints y ejemplos
 
@@ -74,14 +76,14 @@ Ejemplo de borrador deshabilitado; enviar `isEnabled: true` únicamente después
 {
   "isEnabled": false,
   "calendar": {
-    "nominationOpeningDayOffset": 0,
-    "nominationOpeningLocalTime": "08:00",
-    "nominationClosingDayOffset": 9,
-    "nominationClosingLocalTime": "18:00",
-    "opinionOpeningDayOffset": 10,
-    "opinionOpeningLocalTime": "08:00",
-    "opinionClosingDayOffset": 19,
-    "opinionClosingLocalTime": "18:00"
+    "nominationOpeningDayOffset": -8,
+    "nominationOpeningLocalTime": "00:00",
+    "nominationClosingDayOffset": 7,
+    "nominationClosingLocalTime": "00:00",
+    "opinionOpeningDayOffset": -8,
+    "opinionOpeningLocalTime": "00:00",
+    "opinionClosingDayOffset": 7,
+    "opinionClosingLocalTime": "00:00"
   },
   "version": "VERSION_OBTENIDA_DEL_GET"
 }
@@ -107,14 +109,14 @@ No guarda configuración, auditoría ni convocatorias. Recibe:
 ```json
 {
   "calendar": {
-    "nominationOpeningDayOffset": 0,
-    "nominationOpeningLocalTime": "08:00",
-    "nominationClosingDayOffset": 9,
-    "nominationClosingLocalTime": "18:00",
-    "opinionOpeningDayOffset": 10,
-    "opinionOpeningLocalTime": "08:00",
-    "opinionClosingDayOffset": 19,
-    "opinionClosingLocalTime": "18:00"
+    "nominationOpeningDayOffset": -8,
+    "nominationOpeningLocalTime": "00:00",
+    "nominationClosingDayOffset": 7,
+    "nominationClosingLocalTime": "00:00",
+    "opinionOpeningDayOffset": -8,
+    "opinionOpeningLocalTime": "00:00",
+    "opinionClosingDayOffset": 7,
+    "opinionClosingLocalTime": "00:00"
   },
   "upcomingMonths": 3
 }
@@ -129,10 +131,10 @@ UpcomingMonths admite 1..24 y agrega meses evaluados desde el mes local actual; 
     {
       "evaluationMonth": "2026-10-01",
       "dates": {
-        "nominationOpening": "2026-11-01T14:00:00+00:00",
-        "nominationClosing": "2026-11-11T00:00:00+00:00",
-        "opinionOpening": "2026-11-11T14:00:00+00:00",
-        "opinionClosing": "2026-11-21T00:00:00+00:00"
+        "nominationOpening": "2026-10-24T06:00:00+00:00",
+        "nominationClosing": "2026-11-08T06:00:00+00:00",
+        "opinionOpening": "2026-10-24T06:00:00+00:00",
+        "opinionClosing": "2026-11-08T06:00:00+00:00"
       },
       "alreadyExists": false,
       "existingCampaignId": null,
@@ -142,11 +144,11 @@ UpcomingMonths admite 1..24 y agrega meses evaluados desde el mes local actual; 
       "existingCampaign": null
     }
   ],
-  "pendingMonths": ["2026-10-01"]
+  "pendingMonths": ["2026-10-01", "2026-11-01"]
 }
 ```
 
-El ejemplo omite las entradas futuras por brevedad. `dates` son las fechas propuestas; cuando alreadyExists=true, `existingCampaign` muestra los periodos realmente guardados, que **no se modificarán**. Esa vista informativa no entrega una versión para editar la convocatoria: consultarla en su endpoint administrativo antes de modificarla. La vista previa no reserva fechas; el guardado y cada generación revalidan conflictos.
+El ejemplo muestra solo la entrada de octubre por brevedad; omite la entrada pendiente de noviembre y las futuras. Los pendientes incluyen el mes actual si falta. `dates` son las fechas propuestas; cuando alreadyExists=true, `existingCampaign` muestra los periodos realmente guardados, que **no se modificarán**. Esa vista informativa no entrega una versión para editar la convocatoria: consultarla en su endpoint administrativo antes de modificarla. La vista previa no reserva fechas; el guardado y cada generación revalidan conflictos.
 
 ## Migración y transición segura
 
@@ -184,7 +186,7 @@ La presencia de cualquier sección Schedule heredada bloquea el worker sin leer 
 - Pruebas: `Campaigns/AutomationTestStore.cs`, `Campaigns/PersistentAutomationTests.cs`, `Campaigns/CampaignAutomationTests.cs`, `Authentication/AuthHttpTests.cs`, `Persistence/ModelTests.cs`.
 - Documentación: este archivo sustituye la guía anterior de calendario por variables.
 
-## Verificación y límites
+## Verificación histórica de la entrega inicial y límites
 
 - Build Release: correcto, 0 errores y 0 advertencias.
 - Última ejecución completa de la suite, anterior a la instrucción de detener los tests: **335 pruebas aprobadas, 0 fallos, 0 omitidas**. Después se ajustó la serialización de auditoría para excluir la versión anterior del registro de valores nuevos; ese ajuste compiló en Release, pero no se repitieron los tests por indicación del usuario. Incluye calendario inicial apagado, activación/pausa, permiso técnico, legado bloqueado, versiones, auditoría, conflictos, vista previa sin escrituras, cambios en caliente, duplicados, preservación de archivos/cambios manuales, temporizador/cancelación y recuperación de fallos simulados.

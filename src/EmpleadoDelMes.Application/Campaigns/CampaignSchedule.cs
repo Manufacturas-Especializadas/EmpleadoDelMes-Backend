@@ -2,9 +2,16 @@ namespace EmpleadoDelMes.Application.Campaigns;
 
 public sealed record CampaignSchedulePoint(int DayOffset, TimeOnly LocalTime)
 {
+    public const int MinimumDayOffset = -31;
+    public const int MaximumDayOffset = 365;
+
     public DateTimeOffset ToUtc(DateOnly evaluationMonth, TimeZoneInfo zone)
     {
-        if (DayOffset < 0) throw new ArgumentException("Los días relativos del calendario no pueden ser negativos.");
+        if (DayOffset is < MinimumDayOffset or > MaximumDayOffset)
+            throw new ArgumentException("Los días relativos deben estar entre -31 y 365.");
+        if (evaluationMonth.Day != 1 || evaluationMonth == new DateOnly(9999, 12, 1))
+            throw new ArgumentException("El mes evaluado debe permitir calcular el inicio del mes siguiente.");
+        // AddMonths/AddDays enforce DateOnly bounds; no wraparound or silent date clamping.
         var local = evaluationMonth.AddMonths(1).AddDays(DayOffset).ToDateTime(LocalTime, DateTimeKind.Unspecified);
         if (zone.IsInvalidTime(local) || zone.IsAmbiguousTime(local))
             throw new ArgumentException("El calendario contiene una hora local inexistente o ambigua. Ajusta la programación.");
