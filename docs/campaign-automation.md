@@ -1,101 +1,200 @@
-# Generación mensual automática — Tarea 5C
+# Automatización mensual configurable desde Administración
 
-La automatización está **deshabilitada por defecto**. Esta entrega no ejecuta cambios contra bases reales ni habilita el proceso en ningún ambiente.
+## Alcance y arquitectura
 
-## Configuración
+Implementación en la rama de trabajo `cambios` del backend. No se modificó el frontend, Azure, autenticación, roles ni bases reales. No se inició la API local contra SQL Server; el host HTTP usado por las pruebas sustituye los repositorios y Identity por dobles en memoria y desactiva bootstrap y worker.
 
-En `appsettings.json` se versionan únicamente valores no sensibles:
+- **Dominio:** `CampaignAutomationConfiguration`, singleton con Id=1, calendario opcional inicialmente, activación, responsable, fecha UTC y RowVersion. `CampaignAutomationCalendar` contiene los cuatro desplazamientos/horas. `CampaignAutomationAuditEntry` registra valores anteriores/nuevos no sensibles.
+- **Aplicación:** contratos, validación, vista previa y coordinación mediante `CampaignAutomationService`. Reutiliza `CampaignSchedule`, `CampaignService` y `CampaignNominationPolicy`.
+- **Infraestructura:** EF almacena configuración y auditoría. `CampaignAutomationStore` comparte `CampaignAdministrationLock` con altas y operaciones administrativas existentes. El bloqueo es transaccional y exclusivo mediante SQL Server, no un mutex local.
+- **API:** endpoints administrativos y ciclo del worker. Se mantienen TimeProvider, PeriodicTimer, cancelación y reintento en el siguiente intervalo. El calendario administrativo se vuelve a leer en SQL bajo bloqueo antes de cada posible creación; no existe la antigua caché `completedLocalMonth`.
+
+La generación efectiva requiere permiso técnico, activación SQL y ausencia de configuración heredada. Cada mes usa una transacción: releer configuración, comprobar existencia, construir ambos periodos Automatic, validar exclusividad y confirmar. CampaignRepository participa en esa transacción sin abrir ni confirmar una transacción anidada. La creación manual conserva su transacción propia. El índice único EvaluationMonth sigue siendo la última defensa contra duplicados.
+
+La pausa confirmada queda serializada respecto de la inserción: una generación que obtuvo primero el bloqueo puede terminar antes de la pausa; una generación posterior al commit de la pausa no inserta. Los meses ya confirmados permanecen si un mes posterior falla. Ningún proceso modifica convocatorias existentes, incluidas archivadas, manuales o con horarios excepcionales/evaluaciones.
+
+## Configuración técnica y calendario SQL
+
+Infraestructura conserva exclusivamente:
+
+| Ajuste | Uso |
+|---|---|
+| CampaignAutomation__Enabled | Interruptor técnico principal; ausente/false no inicia consultas del worker |
+| CampaignAutomation__TimeZoneId | America/Monterrey; otro valor se rechaza si el interruptor está activo |
+| CampaignAutomation__CheckIntervalMinutes | Entero de 1 a 1440; predeterminado 60 |
+| CampaignAutomation__FirstEvaluationMonth | Primer mes recuperable, yyyy-MM-01; obligatorio al activar, año máximo 9997 |
+
+No se modificaron los valores actuales. Estos ajustes técnicos se toman durante el ciclo de vida del proceso; sus cambios requieren reinicio. Los cambios de negocio guardados en SQL se aplican en las comprobaciones siguientes sin reinicio.
+
+Los desplazamientos son días desde el **primer día del mes posterior al mes evaluado**: para octubre de 2026, offset 0 representa 1 de noviembre. Cada hora local debe tener formato HH:mm; offset admitido 0..365. Se convierte mediante America/Monterrey, nunca mediante un offset UTC fijo. Se rechazan apertura >= cierre, horas ambiguas/inexistentes y solapamientos recurrentes de postulaciones. La validación recorre los meses soportados desde el límite técnico hasta 9997, incluyendo cambios de calendario.
+
+La configuración inicial de la migración tiene IsEnabled=false y Calendar=null. Una actualización requiere calendario completo incluso si se guarda deshabilitada. Al activar se valida también contra convocatorias existentes bajo el bloqueo administrativo; un conflicto impide guardar y devuelve 409. Al pausar no se exige resolver conflictos operativos con aperturas excepcionales existentes. Guardar deshabilitado nunca altera los periodos de convocatorias ya registradas.
+
+El límite técnico determina la recuperación de meses faltantes. No se crean registros del mes local actual ni posteriores hasta que estén completos. Nuevos calendarios se aplican a los meses autorizados que todavía no existen, también al recuperar pendientes; conviene revisar esos pendientes antes de activar.
+
+## Endpoints y ejemplos
+
+Todos requieren Bearer válido, rol Administrator y contraseña definitiva. Se reutilizan las políticas y CurrentSessionMiddleware existentes. Otros roles reciben 403; sesión ausente/inválida 401; contraseña temporal 403. No hay endpoint para disparar generación ni para editar Azure.
+
+### GET /api/admin/campaign-automation
+
+Ejemplo ilustrativo de estado inicial con permiso técnico deshabilitado. La versión es opaca: usar siempre el valor recibido, no el ejemplo.
 
 ```json
 {
-  "CampaignAutomation": {
-    "Enabled": false,
-    "TimeZoneId": "America/Monterrey",
-    "CheckIntervalMinutes": 60,
-    "FirstEvaluationMonth": null
-  }
+  "configuration": {
+    "isEnabled": false,
+    "calendar": null,
+    "version": "AAAAAAAAAAE=",
+    "updatedAtUtc": null,
+    "updatedByUserId": null
+  },
+  "technicalEnabled": false,
+  "effectiveEnabled": false,
+  "legacyScheduleDetected": false,
+  "timeZone": "America/Monterrey",
+  "firstEvaluationMonth": null,
+  "operationalStatus": {
+    "lastCheckAtUtc": null,
+    "lastGenerationAtUtc": null,
+    "lastGeneratedMonth": null,
+    "error": null
+  },
+  "statusScope": "CurrentInstance"
 }
 ```
 
-Antes de activar, el responsable debe configurar expresamente el primer mes evaluado autorizado en formato `yyyy-MM-dd`, siempre día 1. Por ejemplo, `2026-10-01` autoriza octubre de 2026 como primer mes; no es un valor predeterminado del código. Un primer mes futuro es válido: el proceso espera sin consultar persistencia hasta que ese mes esté completo.
+El estado operativo es **por proceso**, se reinicia al reiniciar la instancia y no constituye un historial consolidado de Azure. LastGenerationAtUtc solo cambia tras commit de una creación real; encontrar una convocatoria existente no cuenta como generación. La auditoría de configuración sí es persistente. Los errores operativos son mensajes controlados, sin excepciones SQL ni credenciales.
 
-`Enabled` ausente o false no resuelve servicios de persistencia ni ejecuta consultas. Cuando es true se valida toda la configuración al arrancar: zona IANA reconocida, mes inicial válido e intervalo entero entre 1 y 1440 minutos (predeterminado 60). El límite de un día evita una configuración que compruebe con una frecuencia excesivamente baja. Los errores de configuración detienen el arranque con un mensaje en español, antes del trabajo SQL de automatización. No se sustituyen valores inválidos por la zona del sistema.
+### PUT /api/admin/campaign-automation
 
-En desarrollo, configura estos valores mediante User Secrets del proyecto Api o variables de entorno. No actives el proceso sobre una base compartida sin autorizar primero el mes inicial y la base de destino. Cambiar configuración requiere reiniciar la API; el servicio toma una configuración validada al arrancar y no aplica recargas parciales. Para desactivar, establece `Enabled=false` (o elimina cualquier override true) y reinicia. No se eliminan las convocatorias existentes.
+Ejemplo de borrador deshabilitado; enviar `isEnabled: true` únicamente después de aprobar la vista previa y el destino. El campo isEnabled es obligatorio.
 
-## Zona horaria y plataformas
-
-El único origen del instante actual es `TimeProvider.GetUtcNow()`. Se convierte con `TimeZoneInfo.ConvertTime` a `America/Monterrey`; nunca se usa un offset fijo ni la fecha local del servidor. Se evalúa el mes completo anterior a la fecha local resultante. A las 00:30 UTC del 1 de noviembre de 2026 todavía es octubre en Monterrey: la convocatoria más reciente autorizada en ese instante es septiembre, no octubre.
-
-.NET admite identificadores IANA tanto en Windows como en Linux mediante sus datos de globalización. El entorno debe disponer de ICU y datos horarios vigentes; no se recomienda globalization-invariant ni forzar NLS para esta función. En Linux, mantén ICU/tzdata de la imagen oficial actualizados. Una zona no disponible produce un error de configuración, sin fallback. [Referencia de TimeZoneInfo](https://learn.microsoft.com/en-us/dotnet/api/system.timezoneinfo.findsystemtimezonebyid?view=net-10.0).
-
-Se comprobó `America/Monterrey` con las pruebas en Windows. No había un entorno Linux ejecutable en la estación (WSL no instalado y Docker no disponible), por lo que la ejecución Linux queda pendiente. Antes de activar en App Service Linux, ejecutar las pruebas en un entorno .NET 10 Linux con automatización deshabilitada; la prueba `IanaZone_ResolvesThroughPlatformData_AndDefaultIntervalIs60` comprueba la resolución y conversión real de plataforma sin SQL Server.
-
-## Ejecución y recuperación
-
-`CampaignAutomationWorker`, alojado en Api, es un BackgroundService específico con PeriodicTimer y TimeProvider. Comprueba al iniciar y después según el intervalo. Cada ejecución espera a que termine la anterior, sin callbacks concurrentes ni Task.Run propios. En .NET 10, ExecuteAsync se ejecuta fuera del hilo de arranque; un fallo o espera de SQL no bloquea la disponibilidad inicial de la API. La validación de configuración sí ocurre durante StartAsync. [Comportamiento de BackgroundService en .NET 10](https://learn.microsoft.com/en-us/dotnet/core/compatibility/extensions/10.0/backgroundservice-executeasync-task).
-
-Cada comprobación crea un scope y llama a `CampaignService.EnsurePreviousMonthAsync` para cada mes entre FirstEvaluationMonth y el último mes local completo, pasando como referencia el inicio del mes siguiente. Los meses ya existentes no reciben escrituras. Con Schedule.Enabled=false, los nuevos quedan sin archivar, con ambos periodos ManuallyClosed y sin horarios. Con Schedule.Enabled=true, se crean con horarios UTC y ambos modos Automatic; pueden aceptar capturas inmediatamente si el instante actual está dentro de la ventana. Los controles administrativos siguen disponibles.
-
-Solo después de completar toda la comprobación se recuerda el mes local en memoria. Las siguientes comprobaciones de ese mes no consultan SQL. Cuando cambia el mes local, o arranca una nueva instancia, se revisa nuevamente todo el rango autorizado. La memoria es una optimización, no una garantía de unicidad ni un registro durable.
-
-Si falla un mes, los anteriores ya confirmados permanecen. Se registra un evento controlado y en el siguiente intervalo se vuelve a recorrer el rango, recuperando lo que falta sin duplicar. Las excepciones y mensajes internos del proveedor no se incorporan a los logs propios. No se registran cadenas de conexión. La cancelación del host se transmite hasta EF; no se trata como error reintentable y libera el scope y el temporizador.
-
-Entre instancias se reutiliza el índice único EvaluationMonth y la recuperación tras los errores de unicidad. CreateAsync adquiere el mismo CampaignAdministrationLock transaccional que UpdateAsync antes de consultar duplicados y conflictos. CampaignNominationPolicy comprueba ventanas automáticas solapadas y aperturas manuales indefinidas. Un único INSERT guarda la entidad completa; el bloqueo permanece hasta commit. No hay transacciones anidadas. Una creación manual concurrente del mismo mes sigue devolviendo 409 si pierde; el generador recupera la existente. Las pruebas usan dobles: falta validar estas carreras físicamente contra SQL Server.
-
-## Azure App Service (configuración futura)
-
-Los ajustes de aplicación admiten los nombres:
-
-- `CampaignAutomation__Enabled`
-- `CampaignAutomation__TimeZoneId`
-- `CampaignAutomation__CheckIntervalMinutes`
-- `CampaignAutomation__FirstEvaluationMonth`
-
-Mantener Enabled=false hasta autorizar la activación y verificar el destino de SQL. Configurar estos valores por slot para evitar habilitarlos accidentalmente en staging contra producción. No se necesitan nuevos recursos Azure, secretos de automatización ni endpoints de ejecución.
-
-Habilitar **Always On** en un plan compatible al activar la función. Sin Always On, App Service puede descargar una aplicación después de 20 minutos sin solicitudes. Always On reduce la suspensión por inactividad, pero no evita reinicios, despliegues ni interrupciones. [Configuración de App Service](https://learn.microsoft.com/en-us/azure/app-service/configure-common#configure-general-settings).
-
-Esto no es un programador de precisión: con intervalo de 60 minutos, la detección normal ocurre en la comprobación posterior al cambio de mes. El retraso puede ser mayor durante recuperación, indisponibilidad o suspensión. No garantiza ejecución a medianoche. Al volver a ejecutarse recupera los meses omitidos desde el límite configurado.
-
-## Verificación operativa tras una activación autorizada
-
-1. Verificar zona IANA, mes inicial y base de destino; activar y reiniciar únicamente con autorización.
-2. Revisar el evento de comprobación completada (cantidad de meses verificados, no cantidad creada). Si hay advertencias, corregir la disponibilidad y esperar la siguiente comprobación.
-3. Como Administrator con contraseña definitiva, consultar `GET /api/campaigns` recorriendo las páginas. Debe haber un registro por mes autorizado completo, con EvaluationMonth en día 1 y ninguno del mes local actual creado por el proceso.
-4. Consultar `GET /api/campaigns/{id}`: las nuevas deben tener `isArchived=false`. Si Schedule.Enabled=false, modos 2 (ManuallyClosed) y horarios null; si es true, modos 0 (Automatic) y horarios UTC calculados. Comprobar canAcceptNominations y canAcceptOpinions según el instante actual. Las existentes deben conservar sus periodos, fechas y archivo.
-5. Repetir tras un reinicio: no debe haber duplicados ni modificaciones a convocatorias existentes. Las consultas GET solo leen; no ejecutan la generación.
-
-## Calendario automático y variables exactas de Azure
-
-Schedule.Enabled es independiente y false si está ausente. No hay días ni horas operativas predeterminados. Cuando el generador principal está deshabilitado no se valida ni ejecuta el calendario. Cuando ambos están habilitados, se requieren los ocho valores de calendario y TimeZoneId=America/Monterrey.
-
-**Ejemplo exclusivamente ilustrativo; no habilitar sin aprobar fechas y base de destino:**
-
-```text
-CampaignAutomation__Enabled=true
-CampaignAutomation__TimeZoneId=America/Monterrey
-CampaignAutomation__CheckIntervalMinutes=60
-CampaignAutomation__FirstEvaluationMonth=2026-10-01
-CampaignAutomation__Schedule__Enabled=true
-CampaignAutomation__Schedule__NominationOpeningDayOffset=0
-CampaignAutomation__Schedule__NominationOpeningLocalTime=08:00
-CampaignAutomation__Schedule__NominationClosingDayOffset=9
-CampaignAutomation__Schedule__NominationClosingLocalTime=18:00
-CampaignAutomation__Schedule__OpinionOpeningDayOffset=10
-CampaignAutomation__Schedule__OpinionOpeningLocalTime=08:00
-CampaignAutomation__Schedule__OpinionClosingDayOffset=19
-CampaignAutomation__Schedule__OpinionClosingLocalTime=18:00
+```json
+{
+  "isEnabled": false,
+  "calendar": {
+    "nominationOpeningDayOffset": 0,
+    "nominationOpeningLocalTime": "08:00",
+    "nominationClosingDayOffset": 9,
+    "nominationClosingLocalTime": "18:00",
+    "opinionOpeningDayOffset": 10,
+    "opinionOpeningLocalTime": "08:00",
+    "opinionClosingDayOffset": 19,
+    "opinionClosingLocalTime": "18:00"
+  },
+  "version": "VERSION_OBTENIDA_DEL_GET"
+}
 ```
 
-DayOffset es un entero de 0 a 365 (límite técnico de configuración); LocalTime requiere HH:mm en 24 horas. El origen es el primer día del mes siguiente al evaluado: 0 es día 1, 9 es día 10 y 19 es día 20. El desplazamiento es una suma de días, no un día del mes, por lo que puede cruzar meses o años. Para noviembre de 2026 el ejemplo abre postulaciones el 1 de diciembre a las 08:00 locales (14:00 UTC) y cierra opiniones el 20 de diciembre a las 18:00 locales (21 de diciembre a las 00:00 UTC).
+Devuelve 200 con el mismo contrato de GET y la nueva versión. El servidor obtiene UpdatedByUserId de la identidad validada, no del cuerpo. La transacción guarda configuración y auditoría juntas. RowVersion se compara después de adquirir el bloqueo y también se usa como token de concurrencia EF.
 
-Al arrancar se comprueban formato, campos requeridos, apertura anterior a cierre, horas ambiguas/inexistentes y solapamientos de postulaciones entre meses consecutivos. La validación recorre desde FirstEvaluationMonth hasta diciembre de 9997 (último año completo que admite el límite de desplazamiento sin exceder DateOnly); FirstEvaluationMonth posterior se rechaza para calendario habilitado. Utiliza los datos horarios instalados, no un offset fijo. En cada creación se repite el cálculo; un cambio futuro de datos horarios requiere reiniciar y revalidar. Una configuración inválida aborta StartAsync con mensaje controlado antes de crear convocatorias. Los fallos y conflictos contra convocatorias existentes se detectan durante el ciclo, dejan ese mes sin insertar y se reintentan tras corregirlos.
+Errores:
+- 400: calendario incompleto/inválido, versión mal formada o intento de activar mientras quedan claves heredadas.
+- 409: versión obsoleta, bloqueo/concurrencia o conflicto con convocatorias.
+- 503: persistencia no disponible o migración inicial ausente.
 
-Las horas se construyen como DateTimeKind.Unspecified y se comprueban con IsInvalidTime/IsAmbiguousTime antes de ConvertTimeToUtc. No se elige arbitrariamente una de dos horas ambiguas. Las opiniones pueden solaparse entre convocatorias; solo las postulaciones tienen exclusividad.
+Ejemplo de respuesta 409:
 
-En Azure App Service Linux, agregar las claves anteriores en Configuración/variables de entorno del slot correspondiente. El separador doble __ representa secciones de IConfiguration. Mantener .NET 10 con ICU/tzdata disponibles y Always On en un plan compatible. No es necesario cambiar la zona del servidor ni crear recursos, trabajos, secretos o migraciones. La ejecución Linux y SQL real siguen pendientes de validación autorizada.
+```json
+{ "message": "La configuración cambió. Vuelve a consultarla antes de guardar." }
+```
 
-Para activar: configurar primero todas las fechas y el mes inicial, aprobarlas, establecer ambos Enabled=true y reiniciar. Para desactivar solo el calendario nuevo: Schedule__Enabled=false y reiniciar; las nuevas convocatorias vuelven a nacer cerradas. Para detener el generador: CampaignAutomation__Enabled=false y reiniciar. **Ninguna desactivación cancela horarios ya persistidos**: un administrador debe cerrarlos o cambiarlos explícitamente. Habilitar el calendario no completa ni sobrescribe convocatorias preexistentes, incluidas las creadas manualmente, archivadas o recuperadas antes del cambio de configuración.
+### POST /api/admin/campaign-automation/preview
 
-La recuperación aplica el calendario relativo de cada mes faltante, incluso si sus ventanas ya terminaron. No mueve fechas al presente. Si hay conflicto con una convocatoria abierta, ajustar sus controles administrativos o la configuración y esperar el siguiente ciclo (reiniciar si cambió configuración). No se marca el mes local como completado mientras queden errores. Tras completar, las siguientes comprobaciones del mismo mes no vuelven a consultar hasta el cambio de mes o un reinicio. La precisión depende del intervalo y de la disponibilidad de la API; el modo Automatic calcula la apertura efectiva por la hora en cada operación, sin necesitar un callback en la hora exacta.
+No guarda configuración, auditoría ni convocatorias. Recibe:
+
+```json
+{
+  "calendar": {
+    "nominationOpeningDayOffset": 0,
+    "nominationOpeningLocalTime": "08:00",
+    "nominationClosingDayOffset": 9,
+    "nominationClosingLocalTime": "18:00",
+    "opinionOpeningDayOffset": 10,
+    "opinionOpeningLocalTime": "08:00",
+    "opinionClosingDayOffset": 19,
+    "opinionClosingLocalTime": "18:00"
+  },
+  "upcomingMonths": 3
+}
+```
+
+UpcomingMonths admite 1..24 y agrega meses evaluados desde el mes local actual; también se incluyen los meses del rango de recuperación. Ejemplo de una entrada pendiente, para una consulta realizada en noviembre de 2026:
+
+```json
+{
+  "timeZone": "America/Monterrey",
+  "months": [
+    {
+      "evaluationMonth": "2026-10-01",
+      "dates": {
+        "nominationOpening": "2026-11-01T14:00:00+00:00",
+        "nominationClosing": "2026-11-11T00:00:00+00:00",
+        "opinionOpening": "2026-11-11T14:00:00+00:00",
+        "opinionClosing": "2026-11-21T00:00:00+00:00"
+      },
+      "alreadyExists": false,
+      "existingCampaignId": null,
+      "isArchived": false,
+      "isPending": true,
+      "conflicts": [],
+      "existingCampaign": null
+    }
+  ],
+  "pendingMonths": ["2026-10-01"]
+}
+```
+
+El ejemplo omite las entradas futuras por brevedad. `dates` son las fechas propuestas; cuando alreadyExists=true, `existingCampaign` muestra los periodos realmente guardados, que **no se modificarán**. Esa vista informativa no entrega una versión para editar la convocatoria: consultarla en su endpoint administrativo antes de modificarla. La vista previa no reserva fechas; el guardado y cada generación revalidan conflictos.
+
+## Migración y transición segura
+
+Migración generada: `20261105155610_AddCampaignAutomationConfiguration`.
+
+Crea solamente CampaignAutomationConfiguration y CampaignAutomationAudit, sus claves/índice y la fila inicial deshabilitada. No actualiza Campaigns ni otras tablas de negocio. El snapshot quedó actualizado. No se aplicó ninguna migración.
+
+La fábrica `SchemaOnlyContextFactory` exige `--schema-only`, no carga secretos ni inicia Program/host. Usa un destino local deliberadamente no operativo para las herramientas de generación offline. No es la conexión de la aplicación. Los comandos siguientes generan/inspeccionan archivos, **no aplican SQL**:
+
+```powershell
+dotnet build -c Release
+dotnet ef migrations script 20261030164604_AddAccountIsActive 20261105155610_AddCampaignAutomationConfiguration --project src/EmpleadoDelMes.Infrastructure --startup-project src/EmpleadoDelMes.Infrastructure --configuration Release --no-build --output obj/campaign-automation-migration.sql -- --schema-only
+```
+
+Procedimiento pendiente, a realizar por responsables autorizados:
+
+1. Confirmar servidor y base de desarrollo independientes sin revelar credenciales. Mantener el interruptor técnico false. No usar sa para la aplicación.
+2. Revisar el script, respaldo y estrategia de despliegue. Aplicar la migración primero en desarrollo mediante el procedimiento aprobado de la organización. No se autoriza implícitamente su aplicación a producción.
+3. **Antes de cualquier activación**, detener/deshabilitar el worker en todas las instancias y slots antiguos. Una instancia con el binario anterior no conoce el permiso SQL; no deben coexistir generaciones antiguas y nuevas.
+4. Conservar un registro no sensible de los horarios heredados para revisión. Retirar **todas** las claves CampaignAutomation__Schedule__* de las fuentes aplicables: Azure, archivos, overrides, User Secrets y variables locales. Esto incluye Schedule__Enabled=false: su sola presencia bloquea la nueva generación. Revisar la precedencia de fuentes; eliminar un override no elimina una clave presente en appsettings.
+5. Desplegar la versión nueva en todas las instancias manteniendo el interruptor técnico false. Confirmar GET con IsEnabled=false y LegacyScheduleDetected=false. Mantener el calendario técnico único America/Monterrey y revisar FirstEvaluationMonth.
+6. Guardar un calendario SQL deshabilitado, revisar preview, pendientes, convocatorias históricas y aperturas manuales. No se importan ni activan automáticamente valores heredados.
+7. Tras autorización, habilitar el permiso técnico y reiniciar las instancias nuevas; la activación SQL seguirá false. Posteriormente activar mediante PUT con versión vigente. Verificar que EffectiveEnabled=true y observar el siguiente ciclo.
+8. Para pausar operativamente, PUT IsEnabled=false con calendario/versión vigentes. No cierra periodos ya persistidos. Para parada técnica, deshabilitar Enabled y reiniciar. Para rollback de binarios, **deshabilitar primero el permiso técnico en todas las instancias**: el código anterior ignora la pausa SQL.
+
+La presencia de cualquier sección Schedule heredada bloquea el worker sin leer ese calendario, publica un error operativo controlado y prohíbe activación administrativa. No existe fallback al calendario de variables. El frontend futuro solo utiliza estos endpoints; no necesita acceso a Azure.
+
+## Archivos creados o modificados
+
+- API: `Automation/CampaignAutomationSettings.cs`, `Automation/CampaignAutomationCycle.cs`, `Controllers/CampaignAutomationController.cs`, `Program.cs`.
+- Application: `CampaignAutomation/AutomationContracts.cs`, `AutomationCalendarValidation.cs`, `CampaignAutomationService.cs`; extracción de constructor compartido en `Campaigns/CampaignService.cs`.
+- Domain: `Entities/CampaignAutomationConfiguration.cs` (configuración, calendario y auditoría).
+- Infrastructure: `CampaignAutomation/CampaignAutomationStore.cs`, `DependencyInjection.cs`, `Persistence/Configurations/CampaignAutomationConfigurationMapping.cs`, `Persistence/CampaignRepository.cs`, `Persistence/SchemaOnlyContextFactory.cs`.
+- EF: migración indicada, su Designer y `ApplicationDbContextModelSnapshot.cs`.
+- Pruebas: `Campaigns/AutomationTestStore.cs`, `Campaigns/PersistentAutomationTests.cs`, `Campaigns/CampaignAutomationTests.cs`, `Authentication/AuthHttpTests.cs`, `Persistence/ModelTests.cs`.
+- Documentación: este archivo sustituye la guía anterior de calendario por variables.
+
+## Verificación y límites
+
+- Build Release: correcto, 0 errores y 0 advertencias.
+- Última ejecución completa de la suite, anterior a la instrucción de detener los tests: **335 pruebas aprobadas, 0 fallos, 0 omitidas**. Después se ajustó la serialización de auditoría para excluir la versión anterior del registro de valores nuevos; ese ajuste compiló en Release, pero no se repitieron los tests por indicación del usuario. Incluye calendario inicial apagado, activación/pausa, permiso técnico, legado bloqueado, versiones, auditoría, conflictos, vista previa sin escrituras, cambios en caliente, duplicados, preservación de archivos/cambios manuales, temporizador/cancelación y recuperación de fallos simulados.
+- HTTP en host de pruebas: GET/PUT/preview permitidos a Administrator definitivo; 401 sin sesión; 403 para los otros cuatro roles y contraseña temporal; 400 de validación y 409 de versión.
+- Modelo EF: singleton, seed deshabilitado, RowVersion, auditoría y ausencia de diferencias pendientes entre modelo/snapshot.
+- Script SQL generado e inspeccionado offline: únicamente nuevas tablas, seed deshabilitado e historial de migración.
+- `git diff --check`: sin errores.
+
+**No se ejecutaron pruebas contra SQL Server real.** Las pruebas de concurrencia usan un bloqueo simulado compartido; los fallos de almacenamiento se simulan. Falta verificar físicamente sp_getapplock entre conexiones/instancias, permisos SQL, rowversion, actualización del calendario owned, atomicidad de auditoría, rollback, deadlocks y recuperación tras caída. No se afirma validación completa de producción.
+
+También pendientes: revisar la migración en una base de desarrollo autorizada, ensayar convivencia/retirada de instancias antiguas, comprobar ICU/tzdata de Linux, ajustar disponibilidad continua del host y revisar operativamente el backlog. El worker no garantiza ejecución exacta a medianoche: depende del intervalo, disponibilidad y reintentos. El estado abierto/cerrado de periodos existentes sigue evaluándose mediante las reglas de fecha/hora del dominio.
+
+La telemetría de última comprobación/generación es local a la instancia y no durable; para historial operativo global se necesita observabilidad adicional. Un fallo de confirmación de transacción puede dejar resultado incierto: el siguiente ciclo consulta el mes y evita duplicados, sin atribuir una creación no confirmada. No hay UI React nueva en esta tarea.

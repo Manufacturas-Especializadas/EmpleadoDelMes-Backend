@@ -186,7 +186,7 @@ public sealed class ModelTests
         Assert.AreEqual(2, model.FindEntityType(typeof(Nomination))!.GetCheckConstraints().Count());
         foreach (var entity in model.GetEntityTypes().Where(e => e.ClrType.Namespace == typeof(Employee).Namespace))
         {
-            Assert.IsTrue(entity.GetProperties().Where(p => p.IsShadowProperty()).All(p => p.Name == "RowVersion"));
+            Assert.IsTrue(entity.GetProperties().Where(p => p.IsShadowProperty()).All(p => p.Name == "RowVersion" || (entity.IsOwned() && p.IsPrimaryKey() && p.IsForeignKey())));
         }
     }
 

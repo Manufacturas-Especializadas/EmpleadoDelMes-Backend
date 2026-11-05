@@ -46,7 +46,7 @@ public sealed class CampaignRepository(ApplicationDbContext context, TimeProvide
         var entry = context.Campaigns.Add(campaign);
         try
         {
-            await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+            await using var transaction = context.Database.CurrentTransaction is null ? await context.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken) : null;
             if (!await CampaignAdministrationLock.AcquireAsync(context, cancellationToken))
                 throw new CampaignPersistenceException(CampaignError.Concurrency);
             if (await context.Campaigns.AsNoTracking().AnyAsync(c => c.EvaluationMonth == campaign.EvaluationMonth, cancellationToken))
@@ -58,7 +58,7 @@ public sealed class CampaignRepository(ApplicationDbContext context, TimeProvide
             if (others.Any(other => CampaignNominationPolicy.Conflicts(campaign, other, now)))
                 throw new CampaignPersistenceException(CampaignError.Concurrency);
             await context.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
+            if (transaction is not null) await transaction.CommitAsync(cancellationToken);
             return CampaignDto.FromDomain(campaign, Convert.ToBase64String(entry.Property<byte[]>("RowVersion").CurrentValue!), clock.GetUtcNow());
         }
         catch (DbUpdateException ex) when (ex.InnerException is SqlException { Number: 2601 or 2627 })

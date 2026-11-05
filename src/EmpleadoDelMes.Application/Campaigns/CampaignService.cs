@@ -90,20 +90,10 @@ public sealed class CampaignService(ICampaignRepository repository, TimeProvider
         {
             var existing = await repository.GetByMonthAsync(month, cancellationToken);
             if (existing is not null) return returnExisting ? new CampaignResult<CampaignDto>(existing) : DuplicateMonth();
-            var campaign = new Campaign(Guid.NewGuid(), month, clock.GetUtcNow());
-            if (schedule is not null)
-            {
-                try
-                {
-                    var dates = schedule.Calculate(month);
-                    campaign.ScheduleNominations(dates.NominationOpening, dates.NominationClosing);
-                    campaign.ScheduleOpinions(dates.OpinionOpening, dates.OpinionClosing);
-                    campaign.EnableAutomaticNominations();
-                    campaign.EnableAutomaticOpinions();
-                }
-                catch (ArgumentException)
-                { return Invalid<CampaignDto>("La programación automática contiene fechas u horas locales inválidas. Revisa su configuración."); }
-            }
+            Campaign campaign;
+            try { campaign = BuildCampaign(month, clock.GetUtcNow(), schedule); }
+            catch (ArgumentException)
+            { return Invalid<CampaignDto>("La programación automática contiene fechas u horas locales inválidas."); }
             try { return new(await repository.CreateAsync(campaign, cancellationToken)); }
             catch (CampaignPersistenceException ex) when (ex.Error == CampaignError.Duplicate)
             {
@@ -115,6 +105,19 @@ public sealed class CampaignService(ICampaignRepository repository, TimeProvider
             }
         });
 
+    public static Campaign BuildCampaign(DateOnly month, DateTimeOffset now, CampaignSchedule? schedule = null)
+    {
+        var campaign = new Campaign(Guid.NewGuid(), month, now);
+        if (schedule is not null)
+        {
+            var dates = schedule.Calculate(month);
+            campaign.ScheduleNominations(dates.NominationOpening, dates.NominationClosing);
+            campaign.ScheduleOpinions(dates.OpinionOpening, dates.OpinionClosing);
+            campaign.EnableAutomaticNominations();
+            campaign.EnableAutomaticOpinions();
+        }
+        return campaign;
+    }
     private static CampaignResult<CampaignDto> DuplicateMonth() =>
         new(null, CampaignError.Duplicate, "Ya existe una convocatoria para ese mes evaluado.");
 
