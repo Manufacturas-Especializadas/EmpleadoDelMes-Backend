@@ -10,6 +10,8 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddInfrastructure(builder.Configuration);
 builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton(provider =>
+    EmpleadoDelMes.Api.Automation.CampaignAutomationSettings.Read(provider.GetRequiredService<IConfiguration>()).ToTechnical());
 builder.Services.AddHostedService<EmpleadoDelMes.Api.Automation.CampaignAutomationWorker>();
 builder.Services.AddScoped<SessionValidation>();
 builder.Services.AddAuthentication(IdentityConstants.BearerScheme)

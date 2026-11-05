@@ -1,3 +1,4 @@
+using EmpleadoDelMes.Application.CampaignAutomation;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -64,6 +65,9 @@ public sealed class AuthHttpTests
                 services.AddSingleton<IEmployeeRepository>(Store);
                 services.AddSingleton<IAccountTransactionRunner>(Store);
                 services.AddSingleton<ICampaignRepository>(Campaigns);
+                var automationStore = new AutomationTestStore(Campaigns);
+                automationStore.Initialize(false);
+                services.AddSingleton<ICampaignAutomationStore>(automationStore);
                 services.AddSingleton<ISponsorImportDirectory>(new SponsorTestDirectory(Store));
                 services.AddControllers().AddApplicationPart(typeof(AuthorizationProbeController).Assembly);
             });
@@ -696,4 +700,62 @@ public sealed class AuthHttpTests
         Assert.AreEqual("Ana Pérez", me.GetProperty("displayName").GetString());
         Assert.AreEqual("007", me.GetProperty("userName").GetString());
     }
-}
+
+    [TestMethod]
+    [DataRow("Administrator", true)]
+    [DataRow("Sponsor", false)]
+    [DataRow("HumanResources", false)]
+    [DataRow("Safety", false)]
+    [DataRow("Quality", false)]
+    public async Task Automation_RejectsTemporaryPasswordAndOtherRoles(string role, bool temporary)
+    {
+        using var host = new Host(); using var client = host.Client();
+        var account = role == AccountRoles.Sponsor ? await host.Sponsor() : await host.Account(temporary, role);
+        var tokens = await Login(client, account);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", tokens.AccessToken);
+        var get = await client.GetAsync("/api/admin/campaign-automation");
+        Assert.AreEqual(HttpStatusCode.Forbidden, get.StatusCode);
+        var put = await client.PutAsJsonAsync("/api/admin/campaign-automation",
+            new AutomationUpdateRequest(true, AutomationTestStore.Calendar, Convert.ToBase64String(new byte[8])));
+        Assert.AreEqual(HttpStatusCode.Forbidden, put.StatusCode);
+        var preview = await client.PostAsJsonAsync("/api/admin/campaign-automation/preview",
+            new AutomationPreviewRequest(AutomationTestStore.Calendar));
+        Assert.AreEqual(HttpStatusCode.Forbidden, preview.StatusCode);
+    }
+
+    [TestMethod]
+    public async Task Automation_AnonymousRequiresSession()
+    {
+        using var host = new Host(); using var client = host.Client();
+        Assert.AreEqual(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/admin/campaign-automation")).StatusCode);
+        Assert.AreEqual(HttpStatusCode.Unauthorized, (await client.PutAsJsonAsync("/api/admin/campaign-automation",
+            new AutomationUpdateRequest(true, AutomationTestStore.Calendar, ""))).StatusCode);
+        Assert.AreEqual(HttpStatusCode.Unauthorized, (await client.PostAsJsonAsync("/api/admin/campaign-automation/preview",
+            new AutomationPreviewRequest(AutomationTestStore.Calendar))).StatusCode);
+    }
+
+    [TestMethod]
+    public async Task Automation_AdministratorCanPreviewSaveAndReceiveConflictOrValidation()
+    {
+        using var host = new Host(); using var client = host.Client();
+        var account = await host.Account(temporary: false);
+        var tokens = await Login(client, account);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", tokens.AccessToken);
+        var state = (await client.GetFromJsonAsync<AutomationState>("/api/admin/campaign-automation"))!;
+        Assert.IsFalse(state.Configuration.IsEnabled);
+        var preview = await client.PostAsJsonAsync("/api/admin/campaign-automation/preview",
+            new AutomationPreviewRequest(AutomationTestStore.Calendar));
+        Assert.AreEqual(HttpStatusCode.OK, preview.StatusCode);
+        var request = new AutomationUpdateRequest(true, AutomationTestStore.Calendar, state.Configuration.Version);
+        var saved = await client.PutAsJsonAsync("/api/admin/campaign-automation", request);
+        Assert.AreEqual(HttpStatusCode.OK, saved.StatusCode, await saved.Content.ReadAsStringAsync());
+        var updated = (await saved.Content.ReadFromJsonAsync<AutomationState>())!;
+        Assert.IsTrue(updated.Configuration.IsEnabled);
+        Assert.IsFalse(updated.EffectiveEnabled); // Technical switch is disabled in this test host.
+        Assert.AreEqual(account.Account.Id, updated.Configuration.UpdatedByUserId);
+        Assert.AreEqual(HttpStatusCode.Conflict,
+            (await client.PutAsJsonAsync("/api/admin/campaign-automation", request)).StatusCode);
+        Assert.AreEqual(HttpStatusCode.BadRequest,
+            (await client.PutAsJsonAsync("/api/admin/campaign-automation",
+                request with { Calendar = null, Version = updated.Configuration.Version })).StatusCode);
+    }}

@@ -1,3 +1,5 @@
+using EmpleadoDelMes.Application.CampaignAutomation;
+using EmpleadoDelMes.Infrastructure.CampaignAutomation;
 using EmpleadoDelMes.Application.Accounts;
 using EmpleadoDelMes.Application.Campaigns;
 using EmpleadoDelMes.Application.Candidates;
@@ -55,6 +57,9 @@ public static class DependencyInjection
         services.TryAddSingleton(TimeProvider.System);
         services.AddScoped<ICampaignRepository, CampaignRepository>();
         services.AddScoped<CampaignService>();
+        services.AddScoped<ICampaignAutomationStore, CampaignAutomationStore>();
+        services.AddScoped<CampaignAutomationService>();
+        services.TryAddSingleton<CampaignAutomationStatus>();
         services.AddScoped<INominationRepository, NominationRepository>();
         services.AddScoped<NominationService>();
         services.AddScoped<INominationAdminRepository, NominationAdminRepository>();

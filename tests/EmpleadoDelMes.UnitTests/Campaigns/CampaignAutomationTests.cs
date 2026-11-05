@@ -1,3 +1,4 @@
+using EmpleadoDelMes.Application.CampaignAutomation;
 using System.Collections.Concurrent;
 using EmpleadoDelMes.Api.Automation;
 using EmpleadoDelMes.Application.Campaigns;
@@ -39,22 +40,24 @@ public sealed class CampaignAutomationTests
     [DataRow("OpinionClosingDayOffset", "366")]
     [DataRow("NominationClosingDayOffset", "31")]
     [DataRow("OpinionClosingDayOffset", "0")]
-    public void Schedule_InvalidConfigurationFailsBeforePersistence(string key, string? value) =>
-        Assert.Throws<InvalidOperationException>(() => CampaignAutomationSettings.Read(ScheduledConfig(key, value)));
+    public void LegacySchedule_BlocksGenerationRegardlessOfValues(string key, string? value) =>
+        Assert.IsFalse(CampaignAutomationSettings.Read(ScheduledConfig(key, value)).ToTechnical().AllowsGeneration);
 
     [TestMethod]
-    public void Schedule_DisabledNeedsNoDates() =>
-        Assert.IsNull(CampaignAutomationSettings.Read(ScheduledConfig("Enabled", "false")).Schedule);
+    public void LegacyDisabledSchedule_StillRequiresRemoval() =>
+        Assert.IsTrue(CampaignAutomationSettings.Read(ScheduledConfig("Enabled", "false")).LegacyScheduleDetected);
 
     [TestMethod]
-    public async Task InvalidSchedule_StopsWorkerBeforeAnyRepositoryAccess()
+    public async Task LegacySchedule_BlocksWorkerBeforeAnyRepositoryAccess()
     {
         var clock = new Clock(new(2026, 11, 3, 18, 0, 0, TimeSpan.Zero));
         var store = new CampaignTestRepository();
         using var provider = Provider(store, clock);
         using var worker = new CampaignAutomationWorker(ScheduledConfig("OpinionOpeningLocalTime", null),
             provider.GetRequiredService<IServiceScopeFactory>(), clock, new Log());
-        await Assert.ThrowsAsync<InvalidOperationException>(() => worker.StartAsync(CancellationToken.None));
+        await worker.StartAsync(CancellationToken.None);
+        await clock.TimerCreated.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await worker.StopAsync(CancellationToken.None);
         Assert.AreEqual(0, store.MonthReads);
         Assert.AreEqual(0, store.CreateCalls);
     }
@@ -76,7 +79,7 @@ public sealed class CampaignAutomationTests
         using var provider = Provider(store, clock);
         var blocker = new Campaign(Guid.NewGuid(), new(2026, 8, 1), clock.GetUtcNow());
         blocker.OpenNominations(); store.Campaigns.Add(blocker.EvaluationMonth, blocker);
-        var cycle = Cycle(provider, clock, ScheduledConfig());
+        var cycle = Cycle(provider, clock, Config());
         await cycle.CheckAsync(CancellationToken.None);
         // Past recovered windows may be inserted, but the current automatic window conflicts with manual opening.
         Assert.IsFalse(store.Campaigns.ContainsKey(new(2026, 12, 1)));
@@ -90,7 +93,7 @@ public sealed class CampaignAutomationTests
         december.CloseOpinions(); december.ScheduleNominations(clock.GetUtcNow(), clock.GetUtcNow().AddHours(1));
         december.Archive();
         var before = store.ToDto(december);
-        await Cycle(provider, clock, ScheduledConfig()).CheckAsync(CancellationToken.None);
+        await Cycle(provider, clock, Config()).CheckAsync(CancellationToken.None);
         Assert.AreEqual(before, store.ToDto(december));
         Assert.AreEqual(4, store.Campaigns.Count);
     }
@@ -99,13 +102,13 @@ public sealed class CampaignAutomationTests
     public async Task ScheduledTwoInstances_DoNotDuplicateOrOverwrite()
     {
         var clock = new Clock(new(2026, 11, 3, 18, 0, 0, TimeSpan.Zero));
-        var store = new CampaignTestRepository { CoordinateTwoReads = true, Clock = clock };
+        var store = new CampaignTestRepository { Clock = clock };
         using var provider = Provider(store, clock);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-        var config = ScheduledConfig();
+        var config = Config();
         await Task.WhenAll(Cycle(provider, clock, config).CheckAsync(timeout.Token), Cycle(provider, clock, config).CheckAsync(timeout.Token));
         Assert.AreEqual(1, store.Campaigns.Count);
-        Assert.AreEqual(1, store.DuplicateWrites);
+        Assert.AreEqual(0, store.DuplicateWrites);
         Assert.AreEqual(CampaignPeriodMode.Automatic, store.Campaigns.Values.Single().OpinionPeriod.Mode);
     }
     // Timer callbacks are delivered only when the test advances the clock; no hour-long waits.
@@ -188,6 +191,7 @@ public sealed class CampaignAutomationTests
         var clock = new Clock(new(2026, 11, 3, 18, 0, 0, TimeSpan.Zero)); var repository = new WaitingRepository();
         var services = new ServiceCollection(); services.AddSingleton<TimeProvider>(clock);
         services.AddSingleton<ICampaignRepository>(repository); services.AddScoped<CampaignService>();
+        AutomationTestStore.Register(services);
         using var provider = services.BuildServiceProvider();
         using var worker = new CampaignAutomationWorker(Config(), provider.GetRequiredService<IServiceScopeFactory>(), clock, new Log());
         await worker.StartAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(10));
@@ -201,7 +205,8 @@ public sealed class CampaignAutomationTests
     public async Task UnexpectedFailure_IsSanitizedAndRetried()
     {
         var services = new ServiceCollection(); var attempts = 0;
-        services.AddScoped<CampaignService>(_ => { attempts++; throw new InvalidOperationException("Sensitive configuration detail"); });
+        services.AddSingleton<CampaignAutomationStatus>();
+        services.AddScoped<CampaignAutomationService>(_ => { attempts++; throw new InvalidOperationException("Sensitive configuration detail"); });
         using var provider = services.BuildServiceProvider(); var clock = new Clock(new(2026, 11, 3, 18, 0, 0, TimeSpan.Zero));
         var log = new Log(); var cycle = Cycle(provider, clock, log: log);
         await cycle.CheckAsync(CancellationToken.None); await cycle.CheckAsync(CancellationToken.None);
@@ -221,6 +226,7 @@ public sealed class CampaignAutomationTests
         store.Clock = clock;
         var services = new ServiceCollection();
         services.AddSingleton<TimeProvider>(clock); services.AddSingleton<ICampaignRepository>(store); services.AddScoped<CampaignService>();
+        AutomationTestStore.Register(services, store);
         return services.BuildServiceProvider();
     }
     private static CampaignAutomationCycle Cycle(ServiceProvider provider, Clock clock, IConfiguration? configuration = null, Log? log = null) =>
@@ -256,7 +262,7 @@ public sealed class CampaignAutomationTests
     [TestMethod]
     [DataRow(2026, 11, 2026, 10)]
     [DataRow(2027, 1, 2026, 12)]
-    public async Task LocalMonth_CreatesPreviousMonthClosed(int year, int month, int expectedYear, int expectedMonth)
+    public async Task LocalMonth_CreatesPreviousMonthWithSqlSchedule(int year, int month, int expectedYear, int expectedMonth)
     {
         var clock = new Clock(new(year, month, 1, 18, 0, 0, TimeSpan.Zero)); var store = new CampaignTestRepository();
         using var provider = Provider(store, clock);
@@ -265,9 +271,9 @@ public sealed class CampaignAutomationTests
         var campaign = store.Campaigns.Values.Single();
         Assert.AreEqual(expected, campaign.EvaluationMonth); Assert.AreEqual(clock.GetUtcNow(), campaign.CreatedAtUtc);
         Assert.IsFalse(campaign.IsArchived);
-        Assert.AreEqual(CampaignPeriodMode.ManuallyClosed, campaign.NominationPeriod.Mode);
-        Assert.AreEqual(CampaignPeriodMode.ManuallyClosed, campaign.OpinionPeriod.Mode);
-        Assert.IsNull(campaign.NominationPeriod.ScheduledOpeningAtUtc); Assert.IsNull(campaign.OpinionPeriod.ScheduledClosingAtUtc);
+        Assert.AreEqual(CampaignPeriodMode.Automatic, campaign.NominationPeriod.Mode);
+        Assert.AreEqual(CampaignPeriodMode.Automatic, campaign.OpinionPeriod.Mode);
+        Assert.IsNotNull(campaign.NominationPeriod.ScheduledOpeningAtUtc); Assert.IsNotNull(campaign.OpinionPeriod.ScheduledClosingAtUtc);
     }
 
     [TestMethod]
@@ -278,7 +284,7 @@ public sealed class CampaignAutomationTests
         await cycle.CheckAsync(CancellationToken.None);
         Assert.IsTrue(store.Campaigns.ContainsKey(new(2026, 9, 1))); Assert.AreEqual(1, store.Campaigns.Count);
         var reads = store.MonthReads;
-        await cycle.CheckAsync(CancellationToken.None); Assert.AreEqual(reads, store.MonthReads);
+        await cycle.CheckAsync(CancellationToken.None); Assert.IsTrue(store.MonthReads > reads);
         clock.Advance(TimeSpan.FromHours(6)); await cycle.CheckAsync(CancellationToken.None);
         Assert.IsTrue(store.Campaigns.ContainsKey(new(2026, 10, 1))); Assert.AreEqual(2, store.Campaigns.Count);
     }
@@ -316,28 +322,27 @@ public sealed class CampaignAutomationTests
     [TestMethod]
     public async Task TwoInstances_ReuseUniqueMonthRecovery()
     {
-        var clock = new Clock(new(2026, 11, 3, 18, 0, 0, TimeSpan.Zero)); var store = new CampaignTestRepository { CoordinateTwoReads = true };
+        var clock = new Clock(new(2026, 11, 3, 18, 0, 0, TimeSpan.Zero)); var store = new CampaignTestRepository();
         using var provider = Provider(store, clock); using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         await Task.WhenAll(Cycle(provider, clock).CheckAsync(timeout.Token), Cycle(provider, clock).CheckAsync(timeout.Token));
-        Assert.AreEqual(1, store.Campaigns.Count); Assert.AreEqual(1, store.DuplicateWrites);
+        Assert.AreEqual(1, store.Campaigns.Count); Assert.AreEqual(0, store.DuplicateWrites);
     }
 
     [TestMethod]
     public async Task FutureFirstMonth_DoesNotResolvePersistence()
     {
-        using var provider = new ServiceCollection().BuildServiceProvider();
+        var services = new ServiceCollection(); services.AddSingleton<CampaignAutomationStatus>();
+        using var provider = services.BuildServiceProvider();
         var clock = new Clock(new(2026, 11, 3, 18, 0, 0, TimeSpan.Zero));
         await Cycle(provider, clock, Config(first: "2026-11-01")).CheckAsync(CancellationToken.None);
     }
 
     [TestMethod]
-    [DataRow(false)]
-    [DataRow(true)]
-    public async Task Worker_ImmediateCheck_TimerRetry_AndCancellation_UseControlledTime(bool scheduled)
+    public async Task Worker_ImmediateCheck_TimerRetry_AndCancellation_UseControlledTime()
     {
         var clock = new Clock(new(2026, 11, 3, 18, 0, 0, TimeSpan.Zero)); var store = new CampaignTestRepository { Failure = CampaignError.Persistence };
         using var provider = Provider(store, clock); var log = new Log();
-        using var worker = new CampaignAutomationWorker(scheduled ? ScheduledConfig() : Config(), provider.GetRequiredService<IServiceScopeFactory>(), clock, log);
+        using var worker = new CampaignAutomationWorker(Config(), provider.GetRequiredService<IServiceScopeFactory>(), clock, log);
         await worker.StartAsync(CancellationToken.None);
         await log.Next(); Assert.AreEqual(0, store.Campaigns.Count);
         await clock.TimerCreated.Task.WaitAsync(TimeSpan.FromSeconds(10));

@@ -96,6 +96,69 @@ namespace EmpleadoDelMes.Infrastructure.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("EmpleadoDelMes.Domain.Entities.CampaignAutomationAuditEntry", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("AdministratorId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("ChangedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<string>("NewValues")
+                        .IsRequired()
+                        .HasMaxLength(4000)
+                        .HasColumnType("nvarchar(4000)");
+
+                    b.Property<string>("PreviousValues")
+                        .IsRequired()
+                        .HasMaxLength(4000)
+                        .HasColumnType("nvarchar(4000)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ChangedAtUtc");
+
+                    b.ToTable("CampaignAutomationAudit", (string)null);
+                });
+
+            modelBuilder.Entity("EmpleadoDelMes.Domain.Entities.CampaignAutomationConfiguration", b =>
+                {
+                    b.Property<int>("Id")
+                        .HasColumnType("int");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("bit");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<DateTimeOffset?>("UpdatedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<Guid?>("UpdatedByUserId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("CampaignAutomationConfiguration", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_Automation_Singleton", "[Id] = 1");
+                        });
+
+                    b.HasData(
+                        new
+                        {
+                            Id = 1,
+                            IsEnabled = false
+                        });
+                });
+
             modelBuilder.Entity("EmpleadoDelMes.Domain.Entities.CandidateOpinion", b =>
                 {
                     b.Property<Guid>("Id")
@@ -340,9 +403,9 @@ namespace EmpleadoDelMes.Infrastructure.Persistence.Migrations
                         .HasColumnType("uniqueidentifier");
 
                     b.Property<bool>("IsActive")
-    .ValueGeneratedOnAdd()
-    .HasColumnType("bit")
-    .HasDefaultValue(true);
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bit")
+                        .HasDefaultValue(true);
 
                     b.Property<bool>("LockoutEnabled")
                         .HasColumnType("bit");
@@ -530,6 +593,48 @@ namespace EmpleadoDelMes.Infrastructure.Persistence.Migrations
                     b.HasKey("UserId", "LoginProvider", "Name");
 
                     b.ToTable("AspNetUserTokens", (string)null);
+                });
+
+            modelBuilder.Entity("EmpleadoDelMes.Domain.Entities.CampaignAutomationConfiguration", b =>
+                {
+                    b.OwnsOne("EmpleadoDelMes.Domain.Entities.CampaignAutomationCalendar", "Calendar", b1 =>
+                        {
+                            b1.Property<int>("CampaignAutomationConfigurationId")
+                                .HasColumnType("int");
+
+                            b1.Property<int>("NominationClosingDayOffset")
+                                .HasColumnType("int");
+
+                            b1.Property<TimeOnly>("NominationClosingLocalTime")
+                                .HasColumnType("time(0)");
+
+                            b1.Property<int>("NominationOpeningDayOffset")
+                                .HasColumnType("int");
+
+                            b1.Property<TimeOnly>("NominationOpeningLocalTime")
+                                .HasColumnType("time(0)");
+
+                            b1.Property<int>("OpinionClosingDayOffset")
+                                .HasColumnType("int");
+
+                            b1.Property<TimeOnly>("OpinionClosingLocalTime")
+                                .HasColumnType("time(0)");
+
+                            b1.Property<int>("OpinionOpeningDayOffset")
+                                .HasColumnType("int");
+
+                            b1.Property<TimeOnly>("OpinionOpeningLocalTime")
+                                .HasColumnType("time(0)");
+
+                            b1.HasKey("CampaignAutomationConfigurationId");
+
+                            b1.ToTable("CampaignAutomationConfiguration");
+
+                            b1.WithOwner()
+                                .HasForeignKey("CampaignAutomationConfigurationId");
+                        });
+
+                    b.Navigation("Calendar");
                 });
 
             modelBuilder.Entity("EmpleadoDelMes.Domain.Entities.CandidateOpinion", b =>
