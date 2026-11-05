@@ -9,7 +9,7 @@ public static class AutomationCalendarValidation
     public static CampaignAutomationCalendar Parse(AutomationCalendarInput? input)
     {
         if (input is null) throw Invalid();
-        int Day(int? value) => value is >= 0 and <= 365 ? value.Value : throw Invalid();
+        int Day(int? value) => value is >= CampaignSchedulePoint.MinimumDayOffset and <= CampaignSchedulePoint.MaximumDayOffset ? value.Value : throw Invalid();
         TimeOnly Time(string? value) => TimeOnly.TryParseExact(value, "HH:mm", CultureInfo.InvariantCulture,
             DateTimeStyles.None, out var time) ? time : throw Invalid();
         return new(Day(input.NominationOpeningDayOffset), Time(input.NominationOpeningLocalTime),
@@ -51,5 +51,5 @@ public static class AutomationCalendarValidation
             c.OpinionClosingDayOffset, c.OpinionClosingLocalTime.ToString("HH:mm", CultureInfo.InvariantCulture));
 
     private static AutomationException Invalid() => new(CampaignError.Validation,
-        "Completa los cuatro horarios HH:mm y desplazamientos de 0 a 365 días. Cada apertura debe preceder al cierre; las postulaciones mensuales no pueden solaparse ni usar horas ambiguas o inexistentes.");
+        "Completa los cuatro horarios HH:mm y desplazamientos de -31 a 365 días. Cada apertura debe preceder al cierre; las postulaciones mensuales no pueden solaparse ni usar horas ambiguas o inexistentes.");
 }

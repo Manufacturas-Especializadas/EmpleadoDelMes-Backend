@@ -20,12 +20,12 @@ public sealed class CampaignAutomationCycle(CampaignAutomationSettings settings,
         }
         var local = TimeZoneInfo.ConvertTime(clock.GetUtcNow(), settings.TimeZone!);
         var localMonth = new DateOnly(local.Year, local.Month, 1);
-        if (settings.FirstEvaluationMonth >= localMonth) return;
+        if (settings.FirstEvaluationMonth > localMonth) return;
         try
         {
             var service = scope.ServiceProvider.GetRequiredService<CampaignAutomationService>();
             var created = 0;
-            for (var month = settings.FirstEvaluationMonth; month < localMonth; month = month.AddMonths(1))
+            for (var month = settings.FirstEvaluationMonth; month <= localMonth; month = month.AddMonths(1))
             {
                 token.ThrowIfCancellationRequested();
                 var result = await service.GenerateAsync(month, token);
@@ -43,6 +43,11 @@ public sealed class CampaignAutomationCycle(CampaignAutomationSettings settings,
             logger.LogInformation("Comprobación mensual completada. Convocatorias creadas: {Count}.", created);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+        catch (AutomationException ex)
+        {
+            status.Failed(ex.Message);
+            logger.LogWarning("Generación mensual detenida: {Reason}", ex.Message);
+        }
         catch (Exception)
         {
             status.Failed("No fue posible completar la generación. Se reintentará en la siguiente comprobación.");
