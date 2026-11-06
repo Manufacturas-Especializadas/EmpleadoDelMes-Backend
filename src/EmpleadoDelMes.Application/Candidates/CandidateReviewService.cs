@@ -4,7 +4,8 @@ using EmpleadoDelMes.Domain.Enums;
 namespace EmpleadoDelMes.Application.Candidates;
 
 public sealed record CandidateReviewItem(Guid CampaignId, Guid CandidateEmployeeId, string CandidatePayrollNumber,
-    string CandidateFullName, int ValidNominationsCount, bool HumanResourcesHasOpinion, bool SafetyHasOpinion, bool QualityHasOpinion);
+    string CandidateFullName, int ValidNominationsCount, bool HumanResourcesHasOpinion, bool SafetyHasOpinion, bool QualityHasOpinion,
+    bool ImmediateSupervisorHasOpinion = false, bool HasEvaluator = false);
 public sealed record CandidateReviewPage(IReadOnlyList<CandidateReviewItem> Items, int Total, int PageNumber, int PageSize);
 public sealed record ReviewNomination(Guid Id, string SponsorPayrollNumber, string SponsorFullName,
     NominationQualities Qualities, string Justification, DateTimeOffset RegisteredAtUtc);
@@ -12,7 +13,7 @@ public sealed record ReviewOpinion(OpinionSource OpinionSource, bool HasOpinion,
     DateTimeOffset? CreatedAtUtc, DateTimeOffset? LastModifiedAtUtc);
 public sealed record CandidateReviewDetail(Guid CampaignId, DateOnly EvaluationMonth, Guid CandidateEmployeeId,
     string CandidatePayrollNumber, string CandidateFullName, bool IsPreselected, int ValidNominationsCount,
-    IReadOnlyList<ReviewNomination> Nominations, IReadOnlyList<ReviewOpinion> Opinions);
+    IReadOnlyList<ReviewNomination> Nominations, IReadOnlyList<ReviewOpinion> Opinions, Guid? EvaluatorEmployeeId = null);
 
 public interface ICandidateReviewRepository
 {

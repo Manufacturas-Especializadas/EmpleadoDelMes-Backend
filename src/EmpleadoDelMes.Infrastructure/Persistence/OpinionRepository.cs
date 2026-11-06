@@ -60,7 +60,7 @@ public sealed class OpinionRepository(ApplicationDbContext context) : IOpinionRe
     }
 
     public async Task<NominationResult<OpinionSaved>> SaveAsync(Guid campaignId, Guid candidateId, OpinionSource source, byte[]? version,
-        Func<OpinionWriteContext, NominationResult<CandidateOpinion>> change, CancellationToken token)
+        Func<OpinionWriteContext, NominationResult<CandidateOpinion>> change, CancellationToken token, Guid? supervisorUserId = null)
     {
         CandidateOpinion? entity = null;
         try
@@ -68,6 +68,10 @@ public sealed class OpinionRepository(ApplicationDbContext context) : IOpinionRe
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, token);
             if (!await CampaignAdministrationLock.AcquireAsync(context, token))
                 throw new NominationPersistenceException(NominationError.Concurrency);
+            if (source == OpinionSource.ImmediateSupervisor &&
+                !await SupervisorRepository.Owned(context, supervisorUserId ?? Guid.Empty)
+                    .AnyAsync(x => x.CampaignId == campaignId && x.CandidateEmployeeId == candidateId, token))
+                return new(null, NominationError.Forbidden, "No eres el evaluador vinculado a este candidato.");
             var campaign = await context.Campaigns.AsNoTracking().SingleOrDefaultAsync(x => x.Id == campaignId, token);
             var candidateExists = await context.Employees.AsNoTracking().AnyAsync(x => x.Id == candidateId, token);
             var eligible = await Eligible(campaignId, candidateId, token);
