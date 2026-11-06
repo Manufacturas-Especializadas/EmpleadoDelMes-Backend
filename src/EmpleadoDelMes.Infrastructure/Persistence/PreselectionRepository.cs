@@ -7,12 +7,13 @@ using Microsoft.EntityFrameworkCore;
 
 namespace EmpleadoDelMes.Infrastructure.Persistence;
 
-public sealed class PreselectionRepository(ApplicationDbContext context) : IPreselectionRepository
+public sealed class PreselectionRepository(ApplicationDbContext context, TimeProvider clock) : IPreselectionRepository
 {
     public async Task<NominationResult<PreselectionDto>> ChangeAsync(Guid campaignId, Guid candidateId, byte[]? version,
         Func<PreselectionChangeContext, NominationResult<Preselection>> change, CancellationToken token)
     {
         Preselection? entity = null;
+        CampaignEvaluator? binding = null;
         try
         {
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, token);
@@ -39,6 +40,7 @@ public sealed class PreselectionRepository(ApplicationDbContext context) : IPres
             if (!result.IsSuccess) return new(null, result.Error, result.Message);
             entity = result.Value!;
             if (row is null) context.Preselections.Add(entity);
+            if (row is null) binding = await EvaluatorBinding.CaptureAsync(context, campaignId, candidateId, clock.GetUtcNow(), token);
             context.ChangeTracker.DetectChanges();
             if (context.Entry(entity).State != EntityState.Unchanged)
                 await context.SaveChangesAsync(token);
@@ -58,6 +60,7 @@ public sealed class PreselectionRepository(ApplicationDbContext context) : IPres
         finally
         {
             if (entity is not null) context.Entry(entity).State = EntityState.Detached;
+            if (binding is not null) context.Entry(binding).State = EntityState.Detached;
         }
     }
 }

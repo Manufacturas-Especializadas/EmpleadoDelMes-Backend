@@ -14,6 +14,8 @@ public sealed class ApplicationDbContext : IdentityDbContext<ApplicationUser, Id
     }
 
     public DbSet<Employee> Employees => Set<Employee>();
+    public DbSet<CampaignEvaluator> CampaignEvaluators => Set<CampaignEvaluator>();
+    public DbSet<SponsorEmployeeAssignment> SponsorEmployeeAssignments => Set<SponsorEmployeeAssignment>();
     public DbSet<Campaign> Campaigns => Set<Campaign>();
     public DbSet<Nomination> Nominations => Set<Nomination>();
     public DbSet<Preselection> Preselections => Set<Preselection>();

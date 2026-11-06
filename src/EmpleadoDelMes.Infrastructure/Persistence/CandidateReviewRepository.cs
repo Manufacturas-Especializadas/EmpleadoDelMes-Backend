@@ -35,7 +35,9 @@ public sealed class CandidateReviewRepository(ApplicationDbContext context) : IC
                 .Select(x => new CandidateReviewItem(search.CampaignId, x.Id, x.PayrollNumber, x.FullName, x.Count,
                     opinions.Any(o => o.CandidateEmployeeId == x.Id && o.OpinionSource == OpinionSource.HumanResources),
                     opinions.Any(o => o.CandidateEmployeeId == x.Id && o.OpinionSource == OpinionSource.Safety),
-                    opinions.Any(o => o.CandidateEmployeeId == x.Id && o.OpinionSource == OpinionSource.Quality)))
+                    opinions.Any(o => o.CandidateEmployeeId == x.Id && o.OpinionSource == OpinionSource.Quality),
+                    opinions.Any(o => o.CandidateEmployeeId == x.Id && o.OpinionSource == OpinionSource.ImmediateSupervisor),
+                    context.CampaignEvaluators.Any(l => l.CampaignId == search.CampaignId && l.CandidateEmployeeId == x.Id)))
                 .ToArrayAsync(token);
             return new(new(items, total, search.PageNumber, search.PageSize));
         }
@@ -61,14 +63,18 @@ public sealed class CandidateReviewRepository(ApplicationDbContext context) : IC
                 return new(null, NominationError.NotFound, "El candidato ya no tiene postulaciones válidas para esta revisión.");
             var recorded = await context.CandidateOpinions.AsNoTracking()
                 .Where(o => o.CampaignId == campaignId && o.CandidateEmployeeId == candidateId &&
-                    (o.OpinionSource == OpinionSource.HumanResources || o.OpinionSource == OpinionSource.Safety || o.OpinionSource == OpinionSource.Quality))
+                    (o.OpinionSource == OpinionSource.HumanResources || o.OpinionSource == OpinionSource.Safety || o.OpinionSource == OpinionSource.Quality || o.OpinionSource == OpinionSource.ImmediateSupervisor))
                 .Select(o => new ReviewOpinion(o.OpinionSource, true, o.Content, o.CreatedAtUtc, o.LastModifiedAtUtc))
                 .ToArrayAsync(token);
-            var opinions = new[] { OpinionSource.HumanResources, OpinionSource.Safety, OpinionSource.Quality }
+            var opinions = new[] { OpinionSource.HumanResources, OpinionSource.Safety, OpinionSource.Quality, OpinionSource.ImmediateSupervisor }
                 .Select(source => recorded.SingleOrDefault(o => o.OpinionSource == source)
                     ?? new ReviewOpinion(source, false, null, null, null)).ToArray();
+            var evaluator = await (from l in context.CampaignEvaluators.AsNoTracking()
+                                   join a in context.SponsorEmployeeAssignments.AsNoTracking() on l.AssignmentId equals a.Id
+                                   where l.CampaignId == campaignId && l.CandidateEmployeeId == candidateId
+                                   select (Guid?)a.SponsorEmployeeId).SingleOrDefaultAsync(token);
             return new(new(campaignId, month.Value, candidateId, candidate.PayrollNumber, candidate.FullName,
-                true, nominations.Length, nominations, opinions));
+                true, nominations.Length, nominations, opinions, evaluator));
         }
         catch (SqlException ex) { throw new NominationPersistenceException(NominationError.Persistence, ex); }
     }

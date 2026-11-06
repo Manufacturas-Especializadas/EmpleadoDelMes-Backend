@@ -1,6 +1,7 @@
 using EmpleadoDelMes.Application.CampaignAutomation;
 using EmpleadoDelMes.Infrastructure.CampaignAutomation;
 using EmpleadoDelMes.Application.Accounts;
+using EmpleadoDelMes.Application.Assignments;
 using EmpleadoDelMes.Application.Campaigns;
 using EmpleadoDelMes.Application.Candidates;
 using EmpleadoDelMes.Application.Nominations;
@@ -55,6 +56,8 @@ public static class DependencyInjection
             .AddEntityFrameworkStores<ApplicationDbContext>();
 
         services.TryAddSingleton(TimeProvider.System);
+        services.AddScoped<IAssignmentRepository, AssignmentRepository>();
+        services.AddScoped<AssignmentService>();
         services.AddScoped<ICampaignRepository, CampaignRepository>();
         services.AddScoped<CampaignService>();
         services.AddScoped<ICampaignAutomationStore, CampaignAutomationStore>();
@@ -68,6 +71,8 @@ public static class DependencyInjection
         services.AddScoped<PreselectionService>();
         services.AddScoped<IOpinionRepository, OpinionRepository>();
         services.AddScoped<OpinionService>();
+        services.AddScoped<ISupervisorRepository, SupervisorRepository>();
+        services.AddScoped<SupervisorService>();
         services.AddScoped<ICandidateReviewRepository, CandidateReviewRepository>();
         services.AddScoped<CandidateReviewService>();
         services.AddScoped<IEmployeeRepository, EmployeeRepository>();

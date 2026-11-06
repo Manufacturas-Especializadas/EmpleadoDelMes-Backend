@@ -21,7 +21,7 @@ public interface IOpinionRepository
         int pageNumber, int pageSize, CancellationToken token);
     Task<NominationResult<OpinionStatus>> GetAsync(Guid campaignId, Guid candidateId, OpinionSource source, CancellationToken token);
     Task<NominationResult<OpinionSaved>> SaveAsync(Guid campaignId, Guid candidateId, OpinionSource source, byte[]? version,
-        Func<OpinionWriteContext, NominationResult<CandidateOpinion>> change, CancellationToken token);
+        Func<OpinionWriteContext, NominationResult<CandidateOpinion>> change, CancellationToken token, Guid? supervisorUserId = null);
 }
 
 public sealed class OpinionService(IOpinionRepository repository, TimeProvider clock)
