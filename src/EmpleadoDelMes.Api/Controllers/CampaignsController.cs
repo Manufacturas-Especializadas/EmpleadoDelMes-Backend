@@ -9,7 +9,7 @@ namespace EmpleadoDelMes.Api.Controllers;
 
 [ApiController]
 [Route("api/campaigns")]
-[Authorize(Policy = AccountRoles.Administrator)]
+[Authorize(Policy = AccountPolicies.RecognitionManagement)]
 [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
 public sealed class CampaignsController(CampaignService service) : ControllerBase
 {
