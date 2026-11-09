@@ -23,6 +23,8 @@ builder.Services.AddAuthentication(IdentityConstants.BearerScheme)
 builder.Services.AddAuthorization(options =>
 {
     options.FallbackPolicy = new AuthorizationPolicyBuilder().RequireAuthenticatedUser().Build();
+    options.AddPolicy(AccountPolicies.RecognitionManagement, policy =>
+        policy.RequireAuthenticatedUser().RequireRole(AccountRoles.Administrator, AccountRoles.Organizer));
     foreach (var role in new[] { AccountRoles.Administrator, AccountRoles.Sponsor,
         AccountRoles.HumanResources, AccountRoles.Safety, AccountRoles.Quality })
         options.AddPolicy(role, policy => policy.RequireAuthenticatedUser().RequireRole(role));

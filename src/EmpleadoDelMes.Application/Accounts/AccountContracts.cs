@@ -3,12 +3,17 @@ namespace EmpleadoDelMes.Application.Accounts;
 public static class AccountRoles
 {
     public const string Administrator = "Administrator";
+    public const string Organizer = "Organizer";
     public const string Sponsor = "Sponsor";
     public const string HumanResources = "HumanResources";
     public const string Safety = "Safety";
     public const string Quality = "Quality";
     public static bool IsAdministrative(string role) =>
         role is Administrator or HumanResources or Safety or Quality;
+}
+public static class AccountPolicies
+{
+    public const string RecognitionManagement = "RecognitionManagement";
 }
 public enum AccountError { Validation, NotFound, Duplicate, InvalidCredentials, Concurrency, Persistence }
 public sealed record AccountInfo(

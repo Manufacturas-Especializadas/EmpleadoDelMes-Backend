@@ -40,6 +40,7 @@ public sealed class AccountDirectory(
         string[] allowedRoles =
         [
             AccountRoles.Administrator,
+            AccountRoles.Organizer,
             AccountRoles.Sponsor,
             AccountRoles.HumanResources,
             AccountRoles.Safety,

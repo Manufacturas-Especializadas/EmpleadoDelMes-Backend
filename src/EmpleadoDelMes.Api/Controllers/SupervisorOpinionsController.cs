@@ -36,7 +36,7 @@ public sealed class SupervisorOpinionsController(SupervisorService service) : Co
 
 [ApiController]
 [Route("api/admin/preselections")]
-[Authorize(Policy = AccountRoles.Administrator)]
+[Authorize(Policy = AccountPolicies.RecognitionManagement)]
 public sealed class EvaluatorLinksController(SupervisorService service) : ControllerBase
 {
     [HttpPost("{campaignId}/{candidateEmployeeId}/evaluator-link")]

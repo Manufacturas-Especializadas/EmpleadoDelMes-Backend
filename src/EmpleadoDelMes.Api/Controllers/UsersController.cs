@@ -17,6 +17,13 @@ public sealed class UsersController(
 
     public sealed record CreateDepartmentRequest(string? Role);
 
+    [System.Text.Json.Serialization.JsonUnmappedMemberHandling(System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow)]
+    public sealed record CreateOrganizerRequest(string? UserName);
+
+    [HttpPost("organizers")]
+    public async Task<IActionResult> CreateOrganizer(CreateOrganizerRequest request, CancellationToken cancellationToken) =>
+        CreatedAccountResponse(await accountService.CreateAdministrativeAsync(request.UserName!, AccountRoles.Organizer, cancellationToken));
+
     // Crear cuenta para un encargado o jefe.
     [HttpPost("sponsors")]
     public async Task<IActionResult> CreateSponsor(

@@ -35,7 +35,7 @@ public sealed class IdentityAccountService(
     public Task<AccountResult<CreatedAccount>> CreateAdministrativeAsync(string userName, string role, CancellationToken cancellationToken = default) =>
         Guard(async () =>
         {
-            if (!AccountRoles.IsAdministrative(role) || string.IsNullOrWhiteSpace(userName) || userName.Trim().Length > 256)
+            if ((!AccountRoles.IsAdministrative(role) && role != AccountRoles.Organizer) || string.IsNullOrWhiteSpace(userName) || userName.Trim().Length > 256)
                 return Fail<CreatedAccount>(AccountError.Validation, "Indica un usuario y un rol válidos.");
             return await Create(userName.Trim(), null, role, cancellationToken);
         });

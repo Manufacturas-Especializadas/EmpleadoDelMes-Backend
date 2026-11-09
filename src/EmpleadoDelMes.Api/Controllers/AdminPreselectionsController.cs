@@ -10,7 +10,7 @@ namespace EmpleadoDelMes.Api.Controllers;
 
 [ApiController]
 [Route("api/admin/preselections")]
-[Authorize(Policy = AccountRoles.Administrator)]
+[Authorize(Policy = AccountPolicies.RecognitionManagement)]
 [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
 public sealed class AdminPreselectionsController(PreselectionService service) : ControllerBase
 {

@@ -11,7 +11,7 @@ namespace EmpleadoDelMes.Api.Controllers;
 
 [ApiController]
 [Route("api/admin/nominations")]
-[Authorize(Policy = AccountRoles.Administrator)]
+[Authorize(Policy = AccountPolicies.RecognitionManagement)]
 [ResponseCache(
     NoStore = true,
     Location = ResponseCacheLocation.None)]
